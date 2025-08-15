@@ -377,3 +377,50 @@ plt.xlabel('Date')
 plt.ylabel('Level (bps)')
 plt.grid(True, alpha=0.3)
 plt.show()
+
+
+
+def scatter_yearcolor(x, y, index, xlabel, ylabel, title, ratio_bounds=None, beta_bounds=None, poly_deg=1):
+    plot_df = pd.DataFrame({xlabel: x, ylabel: y}, index=index).dropna()
+
+    if ratio_bounds:
+        lo, hi = ratio_bounds
+        plot_df = plot_df[(plot_df[xlabel] > lo) & (plot_df[xlabel] < hi)]
+
+    if beta_bounds:
+        lo, hi = beta_bounds
+        plot_df = plot_df[(plot_df[ylabel] > lo) & (plot_df[ylabel] < hi)]
+
+    if plot_df.empty:
+        return
+
+    years = plot_df.index.year
+    norm = Normalize(vmin=years.min(), vmax=years.max())
+    cmap = cm.get_cmap('coolwarm')
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.subplots_adjust(right=0.88)
+
+    # Scatter coloré par années
+    ax.scatter(plot_df[xlabel], plot_df[ylabel], c=years, cmap=cmap, norm=norm, s=16, alpha=0.7)
+
+    # Best fit line / curve
+    coeffs = np.polyfit(plot_df[xlabel], plot_df[ylabel], deg=poly_deg)
+    p = np.poly1d(coeffs)
+    xs_sorted = np.linspace(plot_df[xlabel].min(), plot_df[xlabel].max(), 200)
+    ax.plot(xs_sorted, p(xs_sorted), color="black", linewidth=2, label=f'Poly fit (deg={poly_deg})')
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    # Colorbar
+    sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])
+    fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
+
+    plt.show()
+
