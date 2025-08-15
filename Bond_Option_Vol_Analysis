@@ -6,82 +6,88 @@ import matplotlib.dates as mdates
 
 WINDOW = 252  # ~1 an ouvré
 
-# 0) indices datés & triés (safe)
+# -- indices datés & triés
 df_IT_10Y.index   = pd.to_datetime(df_IT_10Y.index)
 df_Swap_10Y.index = pd.to_datetime(df_Swap_10Y.index)
 df_IT_10Y = df_IT_10Y.sort_index()
 df_Swap_10Y = df_Swap_10Y.sort_index()
 
-# 1) vols 1Y (sur colonnes bps) — calculés séparément pour éviter d'introduire des NaN
-df_IT_10Y['IT_10Y_vol_bps_1Y']   = pd.to_numeric(df_IT_10Y['IT_10Y_bps'],   errors='coerce').rolling(WINDOW, min_periods=WINDOW).std()
+# -- vols 1Y (sur colonnes bps) CALCULÉS SÉPARÉMENT
+df_IT_10Y['IT_10Y_vol_bps_1Y']     = pd.to_numeric(df_IT_10Y['IT_10Y_bps'],   errors='coerce').rolling(WINDOW, min_periods=WINDOW).std()
 df_Swap_10Y['Swap_10Y_vol_bps_1Y'] = pd.to_numeric(df_Swap_10Y['Swap_10Y_bps'], errors='coerce').rolling(WINDOW, min_periods=WINDOW).std()
 
-# 2) fusion en une seule DF (inner = seulement les dates présentes dans les 2 jeux)
+# -- fusion (inner) puis dropna net
 df = df_IT_10Y[['IT_10Y','IT_10Y_bps','IT_10Y_vol_bps_1Y']].join(
         df_Swap_10Y[['Swap_10Y','Swap_10Y_bps','Swap_10Y_vol_bps_1Y']],
         how='inner'
      )
-
-# 3) drop NaN d’un coup (net): on garde seulement les dates où tout est dispo
 df = df.dropna(subset=['IT_10Y','IT_10Y_bps','IT_10Y_vol_bps_1Y',
                        'Swap_10Y','Swap_10Y_bps','Swap_10Y_vol_bps_1Y'])
 
-# 4) ratios
-df['Level_Ratio'] = df['IT_10Y'] / df['Swap_10Y']
-df['Vol_Ratio']   = df['IT_10Y_vol_bps_1Y'] / df['Swap_10Y_vol_bps_1Y']
+# -- RATIOS (fix): niveaux en BPS
+df['Level_Ratio'] = df['IT_10Y_bps'] / df['Swap_10Y_bps']          # ✅ ratio des niveaux, en bps
+df['Vol_Ratio']   = df['IT_10Y_vol_bps_1Y'] / df['Swap_10Y_vol_bps_1Y']  # ratio des vols
 
-# (si tu veux les ratios dans df_IT_10Y aussi)
+# (optionnel: pousser les ratios dans df_IT_10Y)
 df_IT_10Y['IT_to_Swap_Level_Ratio'] = df['Level_Ratio'].reindex(df_IT_10Y.index)
 df_IT_10Y['IT_to_Swap_Vol_Ratio']   = df['Vol_Ratio'].reindex(df_IT_10Y.index)
 
-# 5) plots — scatter avec colorbar EXTERNE
+# ----------------- SCATTERS (colorbar à l'extérieur) -----------------
 years = df.index.year
 norm = Normalize(vmin=years.min(), vmax=years.max())
 cmap = cm.get_cmap('coolwarm')
 
 fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-# laisser de la place à droite pour la colorbar
-fig.subplots_adjust(right=0.88)
+fig.subplots_adjust(right=0.88)  # de la place pour la colorbar externe
 
-# IT
 axes[0].scatter(df['IT_10Y'], df['IT_10Y_vol_bps_1Y'],
                 c=years, cmap=cmap, norm=norm, s=16)
-axes[0].set_xlabel('IT 10Y (%)')
-axes[0].set_ylabel('Vol 1Y (bps)')
-axes[0].set_title('IT 10Y: vol(1Y) vs niveau')
-axes[0].grid(True)
+axes[0].set_xlabel('IT 10Y (%)'); axes[0].set_ylabel('Vol 1Y (bps)')
+axes[0].set_title('IT 10Y: vol(1Y) vs niveau'); axes[0].grid(True)
 
-# Swap
 axes[1].scatter(df['Swap_10Y'], df['Swap_10Y_vol_bps_1Y'],
                 c=years, cmap=cmap, norm=norm, s=16)
-axes[1].set_xlabel('Swap 10Y (%)')
-axes[1].set_ylabel('Vol 1Y (bps)')
-axes[1].set_title('Swap 10Y: vol(1Y) vs niveau')
-axes[1].grid(True)
+axes[1].set_xlabel('Swap 10Y (%)'); axes[1].set_ylabel('Vol 1Y (bps)')
+axes[1].set_title('Swap 10Y: vol(1Y) vs niveau'); axes[1].grid(True)
 
-# colorbar à l'extérieur (comme ta capture)
 sm = cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
-cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])  # [left, bottom, width, height]
+cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])  # ext.
 fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
-
 plt.show()
 
-# 6) courbes des vols
+# ----------------- COURBES VOL 1Y -----------------
 plt.figure(figsize=(10,5))
 plt.plot(df.index, df['IT_10Y_vol_bps_1Y'],   label='IT 10Y vol 1Y (bps)')
 plt.plot(df.index, df['Swap_10Y_vol_bps_1Y'], label='Swap 10Y vol 1Y (bps)')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-plt.title('Évolution des volat’ (rolling std 1Y)'); plt.ylabel('bps'); plt.legend(); plt.grid(True, alpha=0.3)
+plt.title('Évolution des volat’ (1Y rolling std)'); plt.ylabel('bps'); plt.legend(); plt.grid(True, alpha=0.3)
 plt.tight_layout(); plt.show()
 
-# 7) courbes des ratios
+# ----------------- COURBES RATIOS -----------------
 plt.figure(figsize=(10,5))
 plt.plot(df.index, df['Vol_Ratio'],   label='Vol IT / Vol Swap')
-plt.plot(df.index, df['Level_Ratio'], label='Niveau IT / Niveau Swap')
+plt.plot(df.index, df['Level_Ratio'], label='Niveau IT / Niveau Swap (bps)')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 plt.axhline(1.0, linestyle='--', linewidth=1, alpha=0.6)
 plt.title('Ratios (vol & niveau)'); plt.ylabel('ratio'); plt.legend(); plt.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
+
+# ----------------- NOUVEAUX PLOTS DE CONTROLE -----------------
+# 1) Italy 10Y en bps
+plt.figure(figsize=(10,5))
+plt.plot(df.index, df['IT_10Y_bps'])
+ax = plt.gca()
+ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.title('IT 10Y — niveau (bps)'); plt.ylabel('bps'); plt.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
+
+# 2) Swap 10Y en bps
+plt.figure(figsize=(10,5))
+plt.plot(df.index, df['Swap_10Y_bps'])
+ax = plt.gca()
+ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.title('Swap 10Y — niveau (bps)'); plt.ylabel('bps'); plt.grid(True, alpha=0.3)
 plt.tight_layout(); plt.show()
 
