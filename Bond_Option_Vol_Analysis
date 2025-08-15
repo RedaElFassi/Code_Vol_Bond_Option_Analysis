@@ -1,67 +1,75 @@
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import matplotlib.cm as cm
 from matplotlib.colors import Normalize
+import matplotlib.dates as mdates
 
-# -----------------------------
-# 1) Rolling standard deviation
-# -----------------------------
-WINDOW = 252  # ~1Y ouvré
-vol_IT = df_IT_10Y['IT_10Y'].rolling(WINDOW, min_periods=WINDOW).std()
-vol_Swap = df_Swap_10Y['Swap_10Y'].rolling(WINDOW, min_periods=WINDOW).std()
+# =====================
+# 0) Préparation simple
+# =====================
+WINDOW = 252  # 1Y ouvré
 
-# -----------------------------
-# 2) Aligne tout et calcule ratios
-# -----------------------------
-df_all = pd.concat({
-    'IT_10Y': df_IT_10Y['IT_10Y'],
-    'Swap_10Y': df_Swap_10Y['Swap_10Y'],
-    'IT_10Y_vol': vol_IT,
-    'Swap_10Y_vol': vol_Swap,
-}, axis=1).dropna()
+it = df_IT_10Y[['IT_10Y', 'IT_10Y_bps']].copy()
+sw = df_Swap_10Y[['Swap_10Y', 'Swap_10Y_bps']].copy()
 
-df_all['IT_to_Swap_Level_Ratio'] = df_all['IT_10Y'] / df_all['Swap_10Y']
-df_all['IT_to_Swap_Vol_Ratio']   = df_all['IT_10Y_vol'] / df_all['Swap_10Y_vol']
+# index en datetime (au cas où)
+it.index = pd.to_datetime(it.index)
+sw.index = pd.to_datetime(sw.index)
 
-# Push des 2 colonnes dans df_IT_10Y
-df_IT_10Y = df_IT_10Y.join(
-    df_all[['IT_to_Swap_Level_Ratio','IT_to_Swap_Vol_Ratio']],
-    how='left'
-)
+# colonnes en float (au cas où il reste des strings)
+for c in it.columns: it[c] = pd.to_numeric(it[c], errors='coerce')
+for c in sw.columns: sw[c] = pd.to_numeric(sw[c], errors='coerce')
 
-df_all.index = pd.to_datetime(df_all.index)  # on NE trie pas, on convertit juste
+# ==============================
+# 1) Fusion -> une seule dataframe
+# ==============================
+df = it.join(sw, how='outer')  # union des dates
+df = df.sort_index()
 
+# =======================================
+# 2) Rolling std 1Y sur les colonnes en bps
+# =======================================
+df['IT_10Y_vol_bps_1Y']   = df['IT_10Y_bps'].rolling(WINDOW).std()
+df['Swap_10Y_vol_bps_1Y'] = df['Swap_10Y_bps'].rolling(WINDOW).std()
 
-# -----------------------------
-# Utilitaires couleur par année
-# -----------------------------
-years = df_all.index.year
+# =================
+# 3) Ratios demandés
+# =================
+df['Level_Ratio'] = df['IT_10Y'] / df['Swap_10Y']                     # ratio des taux
+df['Vol_Ratio']   = df['IT_10Y_vol_bps_1Y'] / df['Swap_10Y_vol_bps_1Y']  # ratio des vols
+
+# (Optionnel) pousser les 2 ratios dans df_IT_10Y si tu veux
+df_IT_10Y['IT_to_Swap_Level_Ratio'] = df['Level_Ratio'].reindex(df_IT_10Y.index)
+df_IT_10Y['IT_to_Swap_Vol_Ratio']   = df['Vol_Ratio'].reindex(df_IT_10Y.index)
+
+# ==========================
+# 4) Plots comme sur la photo
+# ==========================
+# Couleur = année
+years = df.index.year
 norm = Normalize(vmin=years.min(), vmax=years.max())
-cmap = cm.get_cmap('coolwarm')  # proche du rendu de ta photo
-colors = cmap(norm(years))
+cmap = cm.get_cmap('coolwarm')
 
-# -----------------------------
-# 3) Scatter "style photo" (2 graphes)
-# -----------------------------
+# --- Scatters: vol vs niveau (couleur = année) ---
+sc_it = df.dropna(subset=['IT_10Y', 'IT_10Y_vol_bps_1Y'])
+sc_sw = df.dropna(subset=['Swap_10Y', 'Swap_10Y_vol_bps_1Y'])
+
 fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
-# A) IT: vol vs niveau
-axes[0].scatter(df_all['IT_10Y'], df_all['IT_10Y_vol'], c=colors, s=16, alpha=0.8, edgecolors='none')
-axes[0].set_xlabel('IT 10Y (niveau)')
-axes[0].set_ylabel('IT 10Y (rolling std 1Y)')
-axes[0].set_title('Daily vol (1Y) vs niveau — IT 10Y')
+axes[0].scatter(sc_it['IT_10Y'], sc_it['IT_10Y_vol_bps_1Y'],
+                c=sc_it.index.year, cmap=cmap, norm=norm, s=16)
+axes[0].set_xlabel('IT 10Y (niveau, %)')
+axes[0].set_ylabel('IT 10Y vol 1Y (bps)')
+axes[0].set_title('IT 10Y: vol(1Y) vs niveau')
 axes[0].grid(True)
 
-# B) Swap: vol vs niveau
-axes[1].scatter(df_all['Swap_10Y'], df_all['Swap_10Y_vol'], c=colors, s=16, alpha=0.8, edgecolors='none')
-axes[1].set_xlabel('Swap 10Y (niveau)')
-axes[1].set_ylabel('Swap 10Y (rolling std 1Y)')
-axes[1].set_title('Daily vol (1Y) vs niveau — Swap 10Y')
+axes[1].scatter(sc_sw['Swap_10Y'], sc_sw['Swap_10Y_vol_bps_1Y'],
+                c=sc_sw.index.year, cmap=cmap, norm=norm, s=16)
+axes[1].set_xlabel('Swap 10Y (niveau, %)')
+axes[1].set_ylabel('Swap 10Y vol 1Y (bps)')
+axes[1].set_title('Swap 10Y: vol(1Y) vs niveau')
 axes[1].grid(True)
 
-# Colorbar verticale commune (année)
 sm = cm.ScalarMappable(norm=norm, cmap=cmap)
 sm.set_array([])
 cbar = fig.colorbar(sm, ax=axes, orientation='vertical', fraction=0.02, pad=0.02)
@@ -70,14 +78,12 @@ cbar.set_label('Année')
 plt.tight_layout()
 plt.show()
 
-# -----------------------------
-# 4) Évolution des volat' (2 courbes)
-# -----------------------------
+# --- Courbes: vols 1Y ---
 plt.figure(figsize=(10, 5))
-plt.plot(df_all.index, df_all['IT_10Y_vol'], label='IT 10Y vol(1Y)')
-plt.plot(df_all.index, df_all['Swap_10Y_vol'], label='Swap 10Y vol(1Y)')
-plt.title('Évolution des volat’ (rolling std 1 an)')
-plt.ylabel('Vol (écart-type)')
+plt.plot(df.index, df['IT_10Y_vol_bps_1Y'],   label='IT 10Y vol 1Y (bps)')
+plt.plot(df.index, df['Swap_10Y_vol_bps_1Y'], label='Swap 10Y vol 1Y (bps)')
+plt.title('Évolution des volat’ (1Y rolling std, bps)')
+plt.ylabel('Vol (bps)')
 plt.xlabel('Date')
 ax = plt.gca()
 ax.xaxis.set_major_locator(mdates.YearLocator())
@@ -87,13 +93,11 @@ plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-# -----------------------------
-# 5) Évolution des ratios (2 courbes)
-# -----------------------------
+# --- Courbes: ratios ---
 plt.figure(figsize=(10, 5))
-plt.plot(df_all.index, df_all['IT_to_Swap_Vol_Ratio'], label='Vol IT / Vol Swap')
-plt.plot(df_all.index, df_all['IT_to_Swap_Level_Ratio'], label='Niveau IT / Niveau Swap')
-plt.title('Ratios: vol et niveau (IT vs Swap)')
+plt.plot(df.index, df['Vol_Ratio'],   label='Vol IT / Vol Swap')
+plt.plot(df.index, df['Level_Ratio'], label='Niveau IT / Niveau Swap')
+plt.title('Ratios (vol & niveau)')
 plt.ylabel('Ratio')
 plt.xlabel('Date')
 ax = plt.gca()
