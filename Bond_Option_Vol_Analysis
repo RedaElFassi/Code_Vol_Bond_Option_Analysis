@@ -165,3 +165,163 @@ fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
 
 plt.show()
 
+
+
+# Partie Regression:
+
+# =========================================
+# Rolling regressions + heatmaps de betas
+# =========================================
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from matplotlib.colors import Normalize
+
+# -- si pas déjà fait
+if 'diff_bps' not in df.columns:
+    df['diff_bps'] = df['IT_10Y_bps'] - df['Swap_10Y_bps']
+
+# --------- Paramètres ----------
+ROLLING_WINDOW = 126  # ~6 mois ouvrés
+ADD_CONST = True      # ajout constante
+
+# --------- Helper: rolling OLS ---------
+def rolling_ols(df_in, y_col, x_cols, window=126, add_const=True, prefix=""):
+    y = pd.to_numeric(df_in[y_col], errors='coerce')
+    X = df_in[x_cols].apply(pd.to_numeric, errors='coerce')
+    data = pd.concat([y, X], axis=1).dropna()
+    if len(data) < window:
+        cols = [f"beta_{c}" for c in x_cols] + [f"t_{c}" for c in x_cols] + ["r2"]
+        return pd.DataFrame(index=pd.DatetimeIndex([]), columns=cols, dtype=float)
+
+    res_rows = []
+    idx_rows = []
+    for i in range(window-1, len(data)):
+        win = data.iloc[i-window+1:i+1]
+        y_win = win[y_col]
+        X_win = win[x_cols]
+        if add_const:
+            X_win = sm.add_constant(X_win, has_constant='add')
+        try:
+            fit = sm.OLS(y_win, X_win, missing='drop').fit()
+        except:
+            continue
+
+        betas = {}
+        tstats = {}
+        for c in x_cols:
+            betas[f"beta_{c}"] = fit.params.get(c, np.nan)
+            tstats[f"t_{c}"] = fit.tvalues.get(c, np.nan)
+        row = {**betas, **tstats, "r2": fit.rsquared}
+        res_rows.append(row)
+        idx_rows.append(win.index[-1])
+
+    out = pd.DataFrame(res_rows, index=pd.DatetimeIndex(idx_rows))
+    if prefix:
+        out = out.add_prefix(prefix)
+    return out
+
+# --------- Définition des régressions ----------
+y_col = 'IT_10Y_vol_bps_1Y'
+REGS = {
+    "R1_volIT_vs_volSwap": {
+        "x_cols": ['Swap_10Y_vol_bps_1Y'],
+    },
+    "R2_volIT_vs_volSwap_and_ITlevel": {
+        "x_cols": ['Swap_10Y_vol_bps_1Y', 'IT_10Y'],
+    },
+    "R3_volIT_vs_diffbps_and_volSwap": {
+        "x_cols": ['diff_bps', 'Swap_10Y_vol_bps_1Y'],
+    },
+    "R4_volIT_vs_volSwap_and_SwapLevel": {
+        "x_cols": ['Swap_10Y_vol_bps_1Y', 'Swap_10Y'],
+    },
+}
+
+# --------- Lancer les rolling OLS ----------
+roll_results = {}
+for name, spec in REGS.items():
+    roll_results[name] = rolling_ols(df, y_col, spec["x_cols"],
+                                     window=ROLLING_WINDOW, add_const=ADD_CONST,
+                                     prefix=f"{name}.")
+
+# --------- Fusionner tous les résultats + features ----------
+features_for_plot = df[['diff_bps', 'Swap_10Y_vol_bps_1Y', 'Swap_10Y', 'Vol_Ratio', 'Level_Ratio']].copy()
+res_all = features_for_plot.copy()
+for name, res in roll_results.items():
+    res_all = res_all.join(res, how='left')
+
+# ---------- Helper: scatter “heatmap année” externe ----------
+def scatter_beta_vs_feature(res_df, beta_col, feature_col, title, xlabel, ylabel="Beta", 
+                            ratio_bounds=None):
+    plot_df = res_df[[beta_col, feature_col]].dropna()
+    if plot_df.empty:
+        return
+    if ratio_bounds and feature_col in ratio_bounds:
+        lo, hi = ratio_bounds[feature_col]
+        plot_df = plot_df[(plot_df[feature_col] > lo) & (plot_df[feature_col] < hi)]
+        if plot_df.empty:
+            return
+
+    years = plot_df.index.year
+    norm = Normalize(vmin=years.min(), vmax=years.max())
+    cmap = cm.get_cmap('coolwarm')
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.subplots_adjust(right=0.88)
+    ax.scatter(plot_df[feature_col], plot_df[beta_col],
+               c=years, cmap=cmap, norm=norm, s=16)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+
+    sm = cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])
+    fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
+    plt.show()
+
+# ---------- Plots (sans filtre) ----------
+ratio_bounds = {'Vol_Ratio': (0.0, 5.0), 'Level_Ratio': (0.0, 5.0)}
+for name, spec in REGS.items():
+    for x in spec['x_cols']:
+        beta_col = f"{name}.beta_{x}"
+        scatter_beta_vs_feature(res_all, beta_col, 'diff_bps',
+            f"{name} — beta({x}) vs diff_bps", "Diff niveau (IT - Swap) [bps]")
+        scatter_beta_vs_feature(res_all, beta_col, 'Swap_10Y_vol_bps_1Y',
+            f"{name} — beta({x}) vs Swap vol (bps)", "Swap 10Y vol 1Y [bps]")
+        scatter_beta_vs_feature(res_all, beta_col, 'Swap_10Y',
+            f"{name} — beta({x}) vs Swap level", "Swap 10Y level [%]")
+        scatter_beta_vs_feature(res_all, beta_col, 'Vol_Ratio',
+            f"{name} — beta({x}) vs Vol_Ratio (0–5)",
+            "Vol_Ratio = IT vol / Swap vol", ratio_bounds=ratio_bounds)
+        scatter_beta_vs_feature(res_all, beta_col, 'Level_Ratio',
+            f"{name} — beta({x}) vs Level_Ratio (0–5)",
+            "Level_Ratio = IT bps / Swap bps", ratio_bounds=ratio_bounds)
+
+# ---------- Version filtrée (R²>0.5 et |t|>1.96) ----------
+def filtered_view(res_df, reg_name, x_name, r2_thresh=0.5, t_thresh=1.96):
+    r2_col = f"{reg_name}.r2"
+    t_col  = f"{reg_name}.t_{x_name}"
+    return res_df[(res_df[r2_col] > r2_thresh) & (res_df[t_col].abs() > t_thresh)]
+
+for name, spec in REGS.items():
+    for x in spec['x_cols']:
+        beta_col = f"{name}.beta_{x}"
+        sub = filtered_view(res_all, name, x)
+        scatter_beta_vs_feature(sub, beta_col, 'diff_bps',
+            f"[Filtered] {name} — beta({x}) vs diff_bps", "Diff niveau (IT - Swap) [bps]")
+        scatter_beta_vs_feature(sub, beta_col, 'Swap_10Y_vol_bps_1Y',
+            f"[Filtered] {name} — beta({x}) vs Swap vol (bps)", "Swap 10Y vol 1Y [bps]")
+        scatter_beta_vs_feature(sub, beta_col, 'Swap_10Y',
+            f"[Filtered] {name} — beta({x}) vs Swap level", "Swap 10Y level [%]")
+        scatter_beta_vs_feature(sub, beta_col, 'Vol_Ratio',
+            f"[Filtered] {name} — beta({x}) vs Vol_Ratio (0–5)",
+            "Vol_Ratio = IT vol / Swap vol", ratio_bounds=ratio_bounds)
+        scatter_beta_vs_feature(sub, beta_col, 'Level_Ratio',
+            f"[Filtered] {name} — beta({x}) vs Level_Ratio (0–5)",
+            "Level_Ratio = IT bps / Swap bps", ratio_bounds=ratio_bounds)
+
+
