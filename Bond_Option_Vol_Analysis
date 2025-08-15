@@ -4,107 +4,84 @@ import matplotlib.cm as cm
 from matplotlib.colors import Normalize
 import matplotlib.dates as mdates
 
-# =====================
-# 0) Préparation simple
-# =====================
-WINDOW = 252  # 1Y ouvré
+WINDOW = 252  # ~1 an ouvré
 
-it = df_IT_10Y[['IT_10Y', 'IT_10Y_bps']].copy()
-sw = df_Swap_10Y[['Swap_10Y', 'Swap_10Y_bps']].copy()
+# 0) indices datés & triés (safe)
+df_IT_10Y.index   = pd.to_datetime(df_IT_10Y.index)
+df_Swap_10Y.index = pd.to_datetime(df_Swap_10Y.index)
+df_IT_10Y = df_IT_10Y.sort_index()
+df_Swap_10Y = df_Swap_10Y.sort_index()
 
-# index en datetime (au cas où)
-it.index = pd.to_datetime(it.index)
-sw.index = pd.to_datetime(sw.index)
+# 1) vols 1Y (sur colonnes bps) — calculés séparément pour éviter d'introduire des NaN
+df_IT_10Y['IT_10Y_vol_bps_1Y']   = pd.to_numeric(df_IT_10Y['IT_10Y_bps'],   errors='coerce').rolling(WINDOW, min_periods=WINDOW).std()
+df_Swap_10Y['Swap_10Y_vol_bps_1Y'] = pd.to_numeric(df_Swap_10Y['Swap_10Y_bps'], errors='coerce').rolling(WINDOW, min_periods=WINDOW).std()
 
-# colonnes en float (au cas où il reste des strings)
-for c in it.columns: it[c] = pd.to_numeric(it[c], errors='coerce')
-for c in sw.columns: sw[c] = pd.to_numeric(sw[c], errors='coerce')
+# 2) fusion en une seule DF (inner = seulement les dates présentes dans les 2 jeux)
+df = df_IT_10Y[['IT_10Y','IT_10Y_bps','IT_10Y_vol_bps_1Y']].join(
+        df_Swap_10Y[['Swap_10Y','Swap_10Y_bps','Swap_10Y_vol_bps_1Y']],
+        how='inner'
+     )
 
-# ==============================
-# 1) Fusion -> une seule dataframe
-# ==============================
-df = it.join(sw, how='outer')  # union des dates
-df = df.sort_index()
+# 3) drop NaN d’un coup (net): on garde seulement les dates où tout est dispo
+df = df.dropna(subset=['IT_10Y','IT_10Y_bps','IT_10Y_vol_bps_1Y',
+                       'Swap_10Y','Swap_10Y_bps','Swap_10Y_vol_bps_1Y'])
 
-# =======================================
-# 2) Rolling std 1Y sur les colonnes en bps
-# =======================================
-df['IT_10Y_vol_bps_1Y']   = df['IT_10Y_bps'].rolling(WINDOW).std()
-df['Swap_10Y_vol_bps_1Y'] = df['Swap_10Y_bps'].rolling(WINDOW).std()
+# 4) ratios
+df['Level_Ratio'] = df['IT_10Y'] / df['Swap_10Y']
+df['Vol_Ratio']   = df['IT_10Y_vol_bps_1Y'] / df['Swap_10Y_vol_bps_1Y']
 
-# =================
-# 3) Ratios demandés
-# =================
-df['Level_Ratio'] = df['IT_10Y'] / df['Swap_10Y']                     # ratio des taux
-df['Vol_Ratio']   = df['IT_10Y_vol_bps_1Y'] / df['Swap_10Y_vol_bps_1Y']  # ratio des vols
-
-# (Optionnel) pousser les 2 ratios dans df_IT_10Y si tu veux
+# (si tu veux les ratios dans df_IT_10Y aussi)
 df_IT_10Y['IT_to_Swap_Level_Ratio'] = df['Level_Ratio'].reindex(df_IT_10Y.index)
 df_IT_10Y['IT_to_Swap_Vol_Ratio']   = df['Vol_Ratio'].reindex(df_IT_10Y.index)
 
-# ==========================
-# 4) Plots comme sur la photo
-# ==========================
-# Couleur = année
+# 5) plots — scatter avec colorbar EXTERNE
 years = df.index.year
 norm = Normalize(vmin=years.min(), vmax=years.max())
 cmap = cm.get_cmap('coolwarm')
 
-# --- Scatters: vol vs niveau (couleur = année) ---
-sc_it = df.dropna(subset=['IT_10Y', 'IT_10Y_vol_bps_1Y'])
-sc_sw = df.dropna(subset=['Swap_10Y', 'Swap_10Y_vol_bps_1Y'])
-
 fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+# laisser de la place à droite pour la colorbar
+fig.subplots_adjust(right=0.88)
 
-axes[0].scatter(sc_it['IT_10Y'], sc_it['IT_10Y_vol_bps_1Y'],
-                c=sc_it.index.year, cmap=cmap, norm=norm, s=16)
-axes[0].set_xlabel('IT 10Y (niveau, %)')
-axes[0].set_ylabel('IT 10Y vol 1Y (bps)')
+# IT
+axes[0].scatter(df['IT_10Y'], df['IT_10Y_vol_bps_1Y'],
+                c=years, cmap=cmap, norm=norm, s=16)
+axes[0].set_xlabel('IT 10Y (%)')
+axes[0].set_ylabel('Vol 1Y (bps)')
 axes[0].set_title('IT 10Y: vol(1Y) vs niveau')
 axes[0].grid(True)
 
-axes[1].scatter(sc_sw['Swap_10Y'], sc_sw['Swap_10Y_vol_bps_1Y'],
-                c=sc_sw.index.year, cmap=cmap, norm=norm, s=16)
-axes[1].set_xlabel('Swap 10Y (niveau, %)')
-axes[1].set_ylabel('Swap 10Y vol 1Y (bps)')
+# Swap
+axes[1].scatter(df['Swap_10Y'], df['Swap_10Y_vol_bps_1Y'],
+                c=years, cmap=cmap, norm=norm, s=16)
+axes[1].set_xlabel('Swap 10Y (%)')
+axes[1].set_ylabel('Vol 1Y (bps)')
 axes[1].set_title('Swap 10Y: vol(1Y) vs niveau')
 axes[1].grid(True)
 
-sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-sm.set_array([])
-cbar = fig.colorbar(sm, ax=axes, orientation='vertical', fraction=0.02, pad=0.02)
-cbar.set_label('Année')
+# colorbar à l'extérieur (comme ta capture)
+sm = cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])  # [left, bottom, width, height]
+fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
 
-plt.tight_layout()
 plt.show()
 
-# --- Courbes: vols 1Y ---
-plt.figure(figsize=(10, 5))
+# 6) courbes des vols
+plt.figure(figsize=(10,5))
 plt.plot(df.index, df['IT_10Y_vol_bps_1Y'],   label='IT 10Y vol 1Y (bps)')
 plt.plot(df.index, df['Swap_10Y_vol_bps_1Y'], label='Swap 10Y vol 1Y (bps)')
-plt.title('Évolution des volat’ (1Y rolling std, bps)')
-plt.ylabel('Vol (bps)')
-plt.xlabel('Date')
 ax = plt.gca()
-ax.xaxis.set_major_locator(mdates.YearLocator())
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.title('Évolution des volat’ (rolling std 1Y)'); plt.ylabel('bps'); plt.legend(); plt.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
 
-# --- Courbes: ratios ---
-plt.figure(figsize=(10, 5))
+# 7) courbes des ratios
+plt.figure(figsize=(10,5))
 plt.plot(df.index, df['Vol_Ratio'],   label='Vol IT / Vol Swap')
 plt.plot(df.index, df['Level_Ratio'], label='Niveau IT / Niveau Swap')
-plt.title('Ratios (vol & niveau)')
-plt.ylabel('Ratio')
-plt.xlabel('Date')
 ax = plt.gca()
-ax.xaxis.set_major_locator(mdates.YearLocator())
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
 plt.axhline(1.0, linestyle='--', linewidth=1, alpha=0.6)
-plt.legend()
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+plt.title('Ratios (vol & niveau)'); plt.ylabel('ratio'); plt.legend(); plt.grid(True, alpha=0.3)
+plt.tight_layout(); plt.show()
+
