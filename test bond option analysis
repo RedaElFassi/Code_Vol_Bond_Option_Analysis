@@ -425,3 +425,51 @@ def scatter_yearcolor(x, y, index, xlabel, ylabel, title, ratio_bounds=None, bet
     plt.show()
 
 
+
+import matplotlib.dates as mdates
+
+# ===== Paramètre de fenêtre pour la corrélation roulante =====
+CORR_WINDOW = 126  # ~6 mois ouvrés (change si tu veux)
+
+# Assure-toi qu'on a bien les colonnes et des dates alignées
+vols = df[['IT_10Y_vol_bps_1Y', 'Swap_10Y_vol_bps_1Y', 'diff_bps']].dropna().copy()
+
+# Corrélation roulante (IT vol vs Swap vol)
+vols['roll_corr_vols'] = (
+    vols['IT_10Y_vol_bps_1Y']
+    .rolling(CORR_WINDOW, min_periods=CORR_WINDOW)
+    .corr(vols['Swap_10Y_vol_bps_1Y'])
+)
+
+# Corrélation globale (sur tout l'échantillon aligné)
+full_corr = vols[['IT_10Y_vol_bps_1Y', 'Swap_10Y_vol_bps_1Y']].corr().iloc[0, 1]
+
+# ===== Plot: corrélation (axe gauche) + spread de niveau IT - Swap (axe droit) =====
+fig, ax1 = plt.subplots(figsize=(11, 5))
+
+# Corrélation roulante — axe gauche
+ax1.plot(vols.index, vols['roll_corr_vols'], label=f'Rolling corr ({CORR_WINDOW}d)', linewidth=1.4)
+ax1.set_ylabel('Corr(Vol IT, Vol Swap)')
+ax1.set_ylim(-1.0, 1.0)
+ax1.axhline(0.0, linestyle='--', linewidth=1, alpha=0.6)
+ax1.grid(True, alpha=0.3)
+
+# Axe X format années
+ax1.xaxis.set_major_locator(mdates.YearLocator())
+ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+
+# Spread — axe droit
+ax2 = ax1.twinx()
+ax2.plot(vols.index, vols['diff_bps'], label='Spread IT - Swap (bps)', linewidth=1.2)
+ax2.set_ylabel('Spread (bps)')
+
+# Légende combinée
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+# Titre avec la corrélation globale en rappel
+plt.title(f'Rolling corr(Vol IT, Vol Swap) & Spread IT-Swap — full corr = {full_corr:.2f}')
+plt.tight_layout()
+plt.show()
+
