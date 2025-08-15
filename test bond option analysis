@@ -201,3 +201,113 @@ for name, spec in REGS.items():
         scatter_yearcolor(sub[beta_col], sub['Level_Ratio'], sub.index,
                           'Level_Ratio', beta_col, f"[Filtered] {name} — beta({x}) vs Level_Ratio",
                           ratio_bounds=ratio_bounds['Level_Ratio'], beta_bounds=beta_bounds)
+
+
+
+
+
+
+#Test : 
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from matplotlib.colors import Normalize
+import statsmodels.api as sm
+
+# --- Données & prépa vols annualisées ---
+WINDOW = 252
+ROLLING_WINDOW = 126
+
+# Index datetime
+df_IT_10Y.index = pd.to_datetime(df_IT_10Y.index)
+df_Swap_10Y.index = pd.to_datetime(df_Swap_10Y.index)
+
+# Conversion bps
+df_IT_10Y['IT_10Y_bps'] = df_IT_10Y['IT_10Y'] * 100
+df_Swap_10Y['Swap_10Y_bps'] = df_Swap_10Y['Swap_10Y'] * 100
+
+# Vol annualisée (diff journalière)
+df_IT_10Y['IT_10Y_chg_bps'] = df_IT_10Y['IT_10Y_bps'].diff()
+df_IT_10Y['IT_10Y_vol_bps_1Y'] = df_IT_10Y['IT_10Y_chg_bps'].rolling(WINDOW, min_periods=WINDOW).std() * np.sqrt(252)
+
+df_Swap_10Y['Swap_10Y_chg_bps'] = df_Swap_10Y['Swap_10Y_bps'].diff()
+df_Swap_10Y['Swap_10Y_vol_bps_1Y'] = df_Swap_10Y['Swap_10Y_chg_bps'].rolling(WINDOW, min_periods=WINDOW).std() * np.sqrt(252)
+
+# --- Fusion ---
+df = pd.concat([
+    df_IT_10Y[['IT_10Y', 'IT_10Y_bps', 'IT_10Y_vol_bps_1Y']],
+    df_Swap_10Y[['Swap_10Y', 'Swap_10Y_bps', 'Swap_10Y_vol_bps_1Y']]
+], axis=1, join='inner').dropna()
+
+# Colonnes dérivées
+df['diff_bps'] = df['IT_10Y_bps'] - df['Swap_10Y_bps']
+df['Level_Ratio'] = df['IT_10Y_bps'] / df['Swap_10Y_bps']
+df['Vol_Ratio'] = df['IT_10Y_vol_bps_1Y'] / df['Swap_10Y_vol_bps_1Y']
+
+# Filtre ratios extrêmes
+df = df[(df['Level_Ratio'] > 0) & (df['Level_Ratio'] <= 5)]
+df = df[(df['Vol_Ratio'] > 0) & (df['Vol_Ratio'] <= 5)]
+
+# --- Rolling régression ---
+def rolling_ols_single(y, x, window):
+    data = pd.concat([y, x], axis=1).dropna()
+    res_rows, idx_rows = [], []
+    for i in range(window-1, len(data)):
+        win = data.iloc[i-window+1:i+1]
+        y_win, x_win = win.iloc[:, 0], sm.add_constant(win.iloc[:, 1])
+        fit = sm.OLS(y_win, x_win).fit()
+        res_rows.append({
+            'beta': fit.params.iloc[1],
+            'tstat': fit.tvalues.iloc[1],
+            'r2': fit.rsquared
+        })
+        idx_rows.append(win.index[-1])
+    return pd.DataFrame(res_rows, index=idx_rows)
+
+reg_results = rolling_ols_single(df['IT_10Y_vol_bps_1Y'], df['Swap_10Y_vol_bps_1Y'], ROLLING_WINDOW)
+df_res = df.join(reg_results, how='left')
+
+# --- Fonction plot heatmap ---
+def scatter_yearcolor(x, y, index, xlabel, ylabel, title, beta_bounds=(0,5), ratio_bounds=None):
+    plot_df = pd.DataFrame({xlabel: x, ylabel: y}, index=index).dropna()
+    if beta_bounds:
+        lo, hi = beta_bounds
+        plot_df = plot_df[(plot_df[ylabel] > lo) & (plot_df[ylabel] < hi)]
+    if ratio_bounds:
+        lo, hi = ratio_bounds
+        plot_df = plot_df[(plot_df[xlabel] > lo) & (plot_df[xlabel] < hi)]
+    if plot_df.empty:
+        return
+    years = plot_df.index.year
+    norm = Normalize(vmin=years.min(), vmax=years.max())
+    cmap = cm.get_cmap('coolwarm')
+    fig, ax = plt.subplots(figsize=(8, 6))
+    fig.subplots_adjust(right=0.88)
+    sc = ax.scatter(plot_df[xlabel], plot_df[ylabel], c=years, cmap=cmap, norm=norm, s=16)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    smap = cm.ScalarMappable(norm=norm, cmap=cmap)
+    smap.set_array([])
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])
+    fig.colorbar(smap, cax=cbar_ax, orientation='vertical', label='Year')
+    plt.show()
+
+# --- Plots non filtrés par R²/tstat ---
+scatter_yearcolor(df_res['diff_bps'], df_res['beta'], df_res.index, 'diff_bps', 'beta', 'Beta vs diff_bps')
+scatter_yearcolor(df_res['Swap_10Y_bps'], df_res['beta'], df_res.index, 'Swap_10Y_bps', 'beta', 'Beta vs Swap level')
+scatter_yearcolor(df_res['Level_Ratio'], df_res['beta'], df_res.index, 'Level_Ratio', 'beta', 'Beta vs Level_Ratio')
+scatter_yearcolor(df_res['Vol_Ratio'], df_res['beta'], df_res.index, 'Vol_Ratio', 'beta', 'Beta vs Vol_Ratio')
+
+# --- Filtre significativité ---
+df_sig = df_res[(df_res['r2'] > 0.6) & (df_res['tstat'].abs() > 2)]
+
+scatter_yearcolor(df_sig['diff_bps'], df_sig['beta'], df_sig.index, 'diff_bps', 'beta', '[Filtered] Beta vs diff_bps')
+scatter_yearcolor(df_sig['Swap_10Y_bps'], df_sig['beta'], df_sig.index, 'Swap_10Y_bps', 'beta', '[Filtered] Beta vs Swap level')
+scatter_yearcolor(df_sig['Level_Ratio'], df_sig['beta'], df_sig.index, 'Level_Ratio', 'beta', '[Filtered] Beta vs Level_Ratio')
+scatter_yearcolor(df_sig['Vol_Ratio'], df_sig['beta'], df_sig.index, 'Vol_Ratio', 'beta', '[Filtered] Beta vs Vol_Ratio')
+
