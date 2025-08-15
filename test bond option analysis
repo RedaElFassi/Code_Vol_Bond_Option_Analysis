@@ -187,4 +187,17 @@ for name, spec in REGS.items():
         beta_col = f"{name}.beta_{x}"
         sub = filtered_view(res_all, name, x)
         scatter_yearcolor(sub[beta_col], sub['diff_bps'], sub.index,
-                          'diff_bps', beta_col, f"[Filtered] {name} — beta
+                          'diff_bps', beta_col, f"[Filtered] {name} — beta({x}) vs diff_bps",
+                          beta_bounds=beta_bounds)
+        scatter_yearcolor(sub[beta_col], sub['Swap_10Y_vol_bps_1Y'], sub.index,
+                          'Swap_10Y_vol_bps_1Y', beta_col, f"[Filtered] {name} — beta({x}) vs Swap vol",
+                          beta_bounds=beta_bounds)
+        scatter_yearcolor(sub[beta_col], sub['Swap_10Y'], sub.index,
+                          'Swap_10Y', beta_col, f"[Filtered] {name} — beta({x}) vs Swap level",
+                          beta_bounds=beta_bounds)
+        scatter_yearcolor(sub[beta_col], sub['Vol_Ratio'], sub.index,
+                          'Vol_Ratio', beta_col, f"[Filtered] {name} — beta({x}) vs Vol_Ratio",
+                          ratio_bounds=ratio_bounds['Vol_Ratio'], beta_bounds=beta_bounds)
+        scatter_yearcolor(sub[beta_col], sub['Level_Ratio'], sub.index,
+                          'Level_Ratio', beta_col, f"[Filtered] {name} — beta({x}) vs Level_Ratio",
+                          ratio_bounds=ratio_bounds['Level_Ratio'], beta_bounds=beta_bounds)
