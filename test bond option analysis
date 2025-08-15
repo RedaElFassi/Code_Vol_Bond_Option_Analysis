@@ -609,3 +609,31 @@ plt.title(f'Rolling Correlations ({CORR_WINDOW}d)')
 plt.tight_layout()
 plt.show()
 
+# --- 6a) Plot Corr(Inflation Swap Vol, Swap Vol) ---
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.plot(df_corr_all.index, df_corr_all[corr_col_inf_vs_swap],
+        color='tab:blue', linewidth=1.4)
+ax.set_ylabel('Correlation')
+ax.set_ylim(-1, 1)
+ax.axhline(0, linestyle='--', linewidth=1, alpha=0.6, color='grey')
+ax.grid(True, alpha=0.3)
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+ax.set_title(f'Rolling Corr ({CORR_WINDOW}d) : Inflation Swap Vol vs Swap Vol')
+plt.tight_layout()
+plt.show()
+
+# --- 6b) Plot Corr(Inflation Swap Vol, IT Vol) ---
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.plot(df_corr_all.index, df_corr_all[corr_col_inf_vs_it],
+        color='tab:green', linewidth=1.4)
+ax.set_ylabel('Correlation')
+ax.set_ylim(-1, 1)
+ax.axhline(0, linestyle='--', linewidth=1, alpha=0.6, color='grey')
+ax.grid(True, alpha=0.3)
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+ax.set_title(f'Rolling Corr ({CORR_WINDOW}d) : Inflation Swap Vol vs IT Vol')
+plt.tight_layout()
+plt.show()
+
