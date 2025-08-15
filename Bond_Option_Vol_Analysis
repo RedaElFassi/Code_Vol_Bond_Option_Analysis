@@ -1,0 +1,103 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.cm as cm
+from matplotlib.colors import Normalize
+
+# -----------------------------
+# 1) Rolling standard deviation
+# -----------------------------
+WINDOW = 252  # ~1Y ouvré
+vol_IT = df_IT_10Y['IT_10Y'].rolling(WINDOW, min_periods=WINDOW).std()
+vol_Swap = df_Swap_10Y['Swap_10Y'].rolling(WINDOW, min_periods=WINDOW).std()
+
+# -----------------------------
+# 2) Aligne tout et calcule ratios
+# -----------------------------
+df_all = pd.concat({
+    'IT_10Y': df_IT_10Y['IT_10Y'],
+    'Swap_10Y': df_Swap_10Y['Swap_10Y'],
+    'IT_10Y_vol': vol_IT,
+    'Swap_10Y_vol': vol_Swap,
+}, axis=1).dropna()
+
+df_all['IT_to_Swap_Level_Ratio'] = df_all['IT_10Y'] / df_all['Swap_10Y']
+df_all['IT_to_Swap_Vol_Ratio']   = df_all['IT_10Y_vol'] / df_all['Swap_10Y_vol']
+
+# Push des 2 colonnes dans df_IT_10Y
+df_IT_10Y = df_IT_10Y.join(
+    df_all[['IT_to_Swap_Level_Ratio','IT_to_Swap_Vol_Ratio']],
+    how='left'
+)
+
+# -----------------------------
+# Utilitaires couleur par année
+# -----------------------------
+years = df_all.index.year
+norm = Normalize(vmin=years.min(), vmax=years.max())
+cmap = cm.get_cmap('coolwarm')  # proche du rendu de ta photo
+colors = cmap(norm(years))
+
+# -----------------------------
+# 3) Scatter "style photo" (2 graphes)
+# -----------------------------
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+# A) IT: vol vs niveau
+axes[0].scatter(df_all['IT_10Y'], df_all['IT_10Y_vol'], c=colors, s=16, alpha=0.8, edgecolors='none')
+axes[0].set_xlabel('IT 10Y (niveau)')
+axes[0].set_ylabel('IT 10Y (rolling std 1Y)')
+axes[0].set_title('Daily vol (1Y) vs niveau — IT 10Y')
+axes[0].grid(True)
+
+# B) Swap: vol vs niveau
+axes[1].scatter(df_all['Swap_10Y'], df_all['Swap_10Y_vol'], c=colors, s=16, alpha=0.8, edgecolors='none')
+axes[1].set_xlabel('Swap 10Y (niveau)')
+axes[1].set_ylabel('Swap 10Y (rolling std 1Y)')
+axes[1].set_title('Daily vol (1Y) vs niveau — Swap 10Y')
+axes[1].grid(True)
+
+# Colorbar verticale commune (année)
+sm = cm.ScalarMappable(norm=norm, cmap=cmap)
+sm.set_array([])
+cbar = fig.colorbar(sm, ax=axes, orientation='vertical', fraction=0.02, pad=0.02)
+cbar.set_label('Année')
+
+plt.tight_layout()
+plt.show()
+
+# -----------------------------
+# 4) Évolution des volat' (2 courbes)
+# -----------------------------
+plt.figure(figsize=(10, 5))
+plt.plot(df_all.index, df_all['IT_10Y_vol'], label='IT 10Y vol(1Y)')
+plt.plot(df_all.index, df_all['Swap_10Y_vol'], label='Swap 10Y vol(1Y)')
+plt.title('Évolution des volat’ (rolling std 1 an)')
+plt.ylabel('Vol (écart-type)')
+plt.xlabel('Date')
+ax = plt.gca()
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# -----------------------------
+# 5) Évolution des ratios (2 courbes)
+# -----------------------------
+plt.figure(figsize=(10, 5))
+plt.plot(df_all.index, df_all['IT_to_Swap_Vol_Ratio'], label='Vol IT / Vol Swap')
+plt.plot(df_all.index, df_all['IT_to_Swap_Level_Ratio'], label='Niveau IT / Niveau Swap')
+plt.title('Ratios: vol et niveau (IT vs Swap)')
+plt.ylabel('Ratio')
+plt.xlabel('Date')
+ax = plt.gca()
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+plt.axhline(1.0, linestyle='--', linewidth=1, alpha=0.6)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
