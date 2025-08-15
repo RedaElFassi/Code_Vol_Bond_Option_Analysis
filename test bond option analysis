@@ -535,3 +535,77 @@ plt.tight_layout()
 plt.show()
 
 
+
+
+# ========================================
+# ANALYSE Inflation Swap Vol
+# ========================================
+
+# --- 1) Plot vol inflation swap vs level inflation swap ---
+scatter_yearcolor(
+    df_Inflation_Swap_10Y['Inflation_Swap_10Y_bps'],
+    df_Inflation_Swap_10Y['Inflation_Swap_10Y_vol_bps_1Y'],
+    df_Inflation_Swap_10Y.index,
+    'Inflation_Swap_10Y_bps',
+    'Inflation_Swap_10Y_vol_bps_1Y',
+    'Inflation Swap Vol vs Inflation Swap Level'
+)
+
+# --- 2) Plot vol inflation swap vs level interest rate swap ---
+df_merge = df_Inflation_Swap_10Y[['Inflation_Swap_10Y_vol_bps_1Y']].join(
+    df[['Swap_10Y_bps']], how='inner'
+)
+scatter_yearcolor(
+    df_merge['Swap_10Y_bps'],
+    df_merge['Inflation_Swap_10Y_vol_bps_1Y'],
+    df_merge.index,
+    'Swap_10Y_bps',
+    'Inflation_Swap_10Y_vol_bps_1Y',
+    'Inflation Swap Vol vs Interest Rate Swap Level'
+)
+
+# --- 3) Corrélation Inflation Swap Vol ↔ Interest Rate Swap Vol ---
+CORR_WINDOW = 126  # ~6 mois ouvrés
+corr_col_inf_vs_swap = f'RollCorr_InfSwapVol_SwapVol_{CORR_WINDOW}d'
+df_corr1 = df_Inflation_Swap_10Y[['Inflation_Swap_10Y_vol_bps_1Y']].join(
+    df[['Swap_10Y_vol_bps_1Y']], how='inner'
+)
+df_corr1[corr_col_inf_vs_swap] = (
+    df_corr1['Inflation_Swap_10Y_vol_bps_1Y']
+      .rolling(CORR_WINDOW, min_periods=CORR_WINDOW)
+      .corr(df_corr1['Swap_10Y_vol_bps_1Y'])
+)
+
+# --- 4) Corrélation Inflation Swap Vol ↔ Italy Vol ---
+corr_col_inf_vs_it = f'RollCorr_InfSwapVol_ITVol_{CORR_WINDOW}d'
+df_corr2 = df_Inflation_Swap_10Y[['Inflation_Swap_10Y_vol_bps_1Y']].join(
+    df[['IT_10Y_vol_bps_1Y']], how='inner'
+)
+df_corr2[corr_col_inf_vs_it] = (
+    df_corr2['Inflation_Swap_10Y_vol_bps_1Y']
+      .rolling(CORR_WINDOW, min_periods=CORR_WINDOW)
+      .corr(df_corr2['IT_10Y_vol_bps_1Y'])
+)
+
+# --- 5) Fusion pour tracer les deux corrélations ---
+df_corr_all = df_corr1[[corr_col_inf_vs_swap]].join(
+    df_corr2[[corr_col_inf_vs_it]], how='inner'
+)
+
+# --- 6) Plot des deux corrélations sur le même graphique ---
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.plot(df_corr_all.index, df_corr_all[corr_col_inf_vs_swap],
+        color='tab:blue', label='Corr(Inflation Swap Vol, Swap Vol)', linewidth=1.4)
+ax.plot(df_corr_all.index, df_corr_all[corr_col_inf_vs_it],
+        color='tab:green', label='Corr(Inflation Swap Vol, IT Vol)', linewidth=1.4)
+ax.set_ylabel('Correlation')
+ax.set_ylim(-1, 1)
+ax.axhline(0, linestyle='--', linewidth=1, alpha=0.6, color='grey')
+ax.grid(True, alpha=0.3)
+ax.xaxis.set_major_locator(mdates.YearLocator())
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+ax.legend(loc='upper left')
+plt.title(f'Rolling Correlations ({CORR_WINDOW}d)')
+plt.tight_layout()
+plt.show()
+
