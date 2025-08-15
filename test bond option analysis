@@ -473,3 +473,47 @@ plt.title(f'Rolling corr(Vol IT, Vol Swap) & Spread IT-Swap — full corr = {ful
 plt.tight_layout()
 plt.show()
 
+
+
+import matplotlib.dates as mdates
+
+# ===== param =====
+CORR_WINDOW = 126  # ~6 mois ouvrés
+
+# 1) corrélation roulante ajoutée à df (si pas déjà calculée)
+corr_col = f'RollCorr_Vols_{CORR_WINDOW}d'
+if corr_col not in df.columns:
+    df[corr_col] = (
+        df['IT_10Y_vol_bps_1Y']
+          .rolling(CORR_WINDOW, min_periods=CORR_WINDOW)
+          .corr(df['Swap_10Y_vol_bps_1Y'])
+    )
+
+# 2) corrélation globale (utile pour le titre)
+full_corr = df[['IT_10Y_vol_bps_1Y','Swap_10Y_vol_bps_1Y']].dropna().corr().iloc[0,1]
+
+# 3) masque pour éviter le début sans valeurs
+mask = df[corr_col].notna() & df['diff_bps'].notna()
+
+# 4) plot directement depuis df (deux axes)
+ax1 = df.loc[mask, corr_col].plot(figsize=(11,5), linewidth=1.4, label=f'Rolling corr ({CORR_WINDOW}d)')
+ax1.set_ylabel('Corr(Vol IT, Vol Swap)')
+ax1.set_ylim(-1.0, 1.0)
+ax1.axhline(0.0, linestyle='--', linewidth=1, alpha=0.6)
+ax1.grid(True, alpha=0.3)
+ax1.xaxis.set_major_locator(mdates.YearLocator())
+ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+
+ax2 = ax1.twinx()
+df.loc[mask, 'diff_bps'].plot(ax=ax2, linewidth=1.2, label='Spread IT - Swap (bps)')
+ax2.set_ylabel('Spread (bps)')
+
+# légende combinée
+h1, l1 = ax1.get_legend_handles_labels()
+h2, l2 = ax2.get_legend_handles_labels()
+ax1.legend(h1+h2, l1+l2, loc='upper left')
+
+ax1.set_title(f'Rolling corr(Vol IT, Vol Swap) & Spread IT-Swap — full corr = {full_corr:.2f}')
+plt.tight_layout()
+plt.show()
+
