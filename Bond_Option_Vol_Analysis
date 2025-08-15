@@ -31,6 +31,9 @@ df_IT_10Y = df_IT_10Y.join(
     how='left'
 )
 
+df_all.index = pd.to_datetime(df_all.index)  # on NE trie pas, on convertit juste
+
+
 # -----------------------------
 # Utilitaires couleur par année
 # -----------------------------
