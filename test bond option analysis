@@ -311,3 +311,69 @@ scatter_yearcolor(df_sig['Swap_10Y_bps'], df_sig['beta'], df_sig.index, 'Swap_10
 scatter_yearcolor(df_sig['Level_Ratio'], df_sig['beta'], df_sig.index, 'Level_Ratio', 'beta', '[Filtered] Beta vs Level_Ratio')
 scatter_yearcolor(df_sig['Vol_Ratio'], df_sig['beta'], df_sig.index, 'Vol_Ratio', 'beta', '[Filtered] Beta vs Vol_Ratio')
 
+
+
+
+# Time series : 
+
+# ==============================
+# 6. Plots time-series
+# ==============================
+
+# Vols
+plt.figure(figsize=(10,5))
+plt.plot(df.index, df['IT_10Y_vol_bps_1Y'], label='IT 10Y vol (bps)')
+plt.plot(df.index, df['Swap_10Y_vol_bps_1Y'], label='Swap 10Y vol (bps)')
+plt.title('IT vs Swap 10Y Vol (bps)')
+plt.xlabel('Date')
+plt.ylabel('Vol (bps)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Levels
+plt.figure(figsize=(10,5))
+plt.plot(df.index, df['IT_10Y_bps'], label='IT 10Y level (bps)')
+plt.plot(df.index, df['Swap_10Y_bps'], label='Swap 10Y level (bps)')
+plt.title('IT vs Swap 10Y Level (bps)')
+plt.xlabel('Date')
+plt.ylabel('Level (bps)')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Vol IT seul
+plt.figure(figsize=(10,4))
+plt.plot(df.index, df['IT_10Y_vol_bps_1Y'], color='blue')
+plt.title('IT 10Y Vol (bps)')
+plt.xlabel('Date')
+plt.ylabel('Vol (bps)')
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Vol Swap seul
+plt.figure(figsize=(10,4))
+plt.plot(df.index, df['Swap_10Y_vol_bps_1Y'], color='orange')
+plt.title('Swap 10Y Vol (bps)')
+plt.xlabel('Date')
+plt.ylabel('Vol (bps)')
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Level IT seul
+plt.figure(figsize=(10,4))
+plt.plot(df.index, df['IT_10Y_bps'], color='blue')
+plt.title('IT 10Y Level (bps)')
+plt.xlabel('Date')
+plt.ylabel('Level (bps)')
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Level Swap seul
+plt.figure(figsize=(10,4))
+plt.plot(df.index, df['Swap_10Y_bps'], color='orange')
+plt.title('Swap 10Y Level (bps)')
+plt.xlabel('Date')
+plt.ylabel('Level (bps)')
+plt.grid(True, alpha=0.3)
+plt.show()
