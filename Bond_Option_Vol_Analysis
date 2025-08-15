@@ -91,3 +91,77 @@ ax.xaxis.set_major_locator(mdates.YearLocator()); ax.xaxis.set_major_formatter(m
 plt.title('Swap 10Y — niveau (bps)'); plt.ylabel('bps'); plt.grid(True, alpha=0.3)
 plt.tight_layout(); plt.show()
 
+
+
+
+
+#test
+
+# --- diff en bps + scatter Vol_Ratio vs diff_bps (style heatmap année) ---
+
+# 1) nouvelle colonne: écart de niveaux en bps
+df['diff_bps'] = df['IT_10Y_bps'] - df['Swap_10Y_bps']
+
+# 2) subset propre pour le plot
+to_plot = df.dropna(subset=['diff_bps', 'Vol_Ratio'])
+
+# 3) couleurs = année + colorbar externe
+years = to_plot.index.year
+from matplotlib.colors import Normalize
+import matplotlib.cm as cm
+norm = Normalize(vmin=years.min(), vmax=years.max())
+cmap = cm.get_cmap('coolwarm')
+
+fig, ax = plt.subplots(figsize=(8, 6))
+fig.subplots_adjust(right=0.88)  # place à droite pour la colorbar
+
+sc = ax.scatter(to_plot['diff_bps'], to_plot['Vol_Ratio'],
+                c=years, cmap=cmap, norm=norm, s=16)
+
+ax.set_xlabel('Diff niveau (IT 10Y - Swap 10Y) [bps]')
+ax.set_ylabel('Vol Ratio (IT vol 1Y / Swap vol 1Y)')
+ax.set_title('Vol Ratio vs Diff de niveau (bps)')
+ax.grid(True)
+
+# colorbar à l’extérieur (comme tes autres graphs)
+sm = cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])  # [left, bottom, width, height]
+fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
+
+plt.show()
+
+
+
+#Test 2
+
+# --- diff_vol_bps vs diff_bps ---
+
+# 1) nouvelle colonne: diff de vol en bps
+df['diff_vol_bps'] = df['IT_10Y_vol_bps_1Y'] - df['Swap_10Y_vol_bps_1Y']
+
+# 2) subset propre
+to_plot_vol = df.dropna(subset=['diff_bps', 'diff_vol_bps'])
+
+# 3) couleurs = année + colorbar externe
+years = to_plot_vol.index.year
+norm = Normalize(vmin=years.min(), vmax=years.max())
+cmap = cm.get_cmap('coolwarm')
+
+fig, ax = plt.subplots(figsize=(8, 6))
+fig.subplots_adjust(right=0.88)  # place pour colorbar
+
+sc = ax.scatter(to_plot_vol['diff_bps'], to_plot_vol['diff_vol_bps'],
+                c=years, cmap=cmap, norm=norm, s=16)
+
+ax.set_xlabel('Diff niveau (IT 10Y - Swap 10Y) [bps]')
+ax.set_ylabel('Diff vol (IT vol 1Y - Swap vol 1Y) [bps]')
+ax.set_title('Diff vol bps vs Diff niveau bps')
+ax.grid(True)
+
+# colorbar externe
+sm = cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.70])
+fig.colorbar(sm, cax=cbar_ax, orientation='vertical', label='Year')
+
+plt.show()
+
