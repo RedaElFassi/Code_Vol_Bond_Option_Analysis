@@ -637,3 +637,32 @@ ax.set_title(f'Rolling Corr ({CORR_WINDOW}d) : Inflation Swap Vol vs IT Vol')
 plt.tight_layout()
 plt.show()
 
+
+import pandas as pd
+
+def countries_buckets_view(bond_list):
+    # colonnes = tous les buckets triés (int si possible)
+    def nb(x):
+        try: return int(x)
+        except: return x
+    buckets = sorted({nb(b) for d in bond_list.values() for b in d},
+                     key=lambda x: (isinstance(x, str), x))
+
+    rows = []
+    for country, bdict in bond_list.items():
+        bdict = {nb(k): v for k, v in bdict.items()}
+        max_len = max([len(v.get("members", [])) for v in bdict.values()] + [0])
+        for r in range(max_len):  # r = ligne 1..max
+            row = {"country": country, "_row": r+1}
+            for b in buckets:
+                members = bdict.get(b, {}).get("members", [])
+                row[b] = members[r] if r < len(members) else ""
+            rows.append(row)
+
+    # index = (country, _row)  -> pandas n'affiche le country qu'une fois par bloc
+    df = (pd.DataFrame(rows)
+            .set_index(["country", "_row"])
+            .sort_index(level=[0,1]))
+    return df
+
+
