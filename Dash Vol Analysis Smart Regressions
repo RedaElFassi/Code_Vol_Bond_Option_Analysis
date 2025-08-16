@@ -282,7 +282,7 @@ def build_selection_df_infl(
     df["sw_bps"] = swap_proc.get(f"{swap_prefix}_{maturity}_bps").reindex(df.index)
     df["sw_vol_bps"] = swap_proc.get(f"{VOL_LABEL}_Vol_{swap_prefix}_{maturity}").reindex(df.index)
 
-    # Country (ex: IT)
+    # Country
     df["it_bps"] = cdf.get(f"{pfx}_{maturity}_bps").reindex(df.index)
     df["it_vol_bps"] = cdf.get(f"{VOL_LABEL}_Vol_{pfx}_{maturity}").reindex(df.index)
 
@@ -554,24 +554,24 @@ def inflation_section_layout():
 
 def beta_section_layout():
     return html.Div([
-        html.H4("β — Regression: Country Vol (IT) vs Nominal Swap Vol"),
+        html.H4(id="beta_title_1"),
         dcc.Graph(id="beta_fig1_swap_beta_ts", config={"displaylogo": False}),
-        html.H4("β — Regression: Country Vol (IT) vs Nominal Swap Vol — R² filter"),
+        html.H4(id="beta_title_2"),
         dcc.Graph(id="beta_fig2_swap_beta_ts_r2", config={"displaylogo": False}),
 
-        html.H4("β — Regression: Country Vol (IT) vs Inflation Swap Vol"),
+        html.H4(id="beta_title_3"),
         dcc.Graph(id="beta_fig3_infl_beta_ts", config={"displaylogo": False}),
-        html.H4("β — Regression: Country Vol (IT) vs Inflation Swap Vol — R² filter"),
+        html.H4(id="beta_title_4"),
         dcc.Graph(id="beta_fig4_infl_beta_ts_r2", config={"displaylogo": False}),
 
-        html.H4("β (IT vs Swap Vol) — vs Diff level (IT − Swap) [bps] — heatmap + poly2"),
+        html.H4(id="beta_title_5"),
         dcc.Graph(id="beta_fig5_swap_beta_vs_diff", config={"displaylogo": False}),
-        html.H4("β (IT vs Swap Vol) — vs Swap level [bps] — heatmap + poly2"),
+        html.H4(id="beta_title_6"),
         dcc.Graph(id="beta_fig6_swap_beta_vs_swlevel", config={"displaylogo": False}),
 
-        html.H4("β (IT vs Inflation Vol) — vs Country level [bps] — heatmap + poly2"),
+        html.H4(id="beta_title_7"),
         dcc.Graph(id="beta_fig7_inflbeta_vs_itlevel", config={"displaylogo": False}),
-        html.H4("β (IT vs Inflation Vol) — vs Inflation swap level [bps] — heatmap + poly2"),
+        html.H4(id="beta_title_8"),
         dcc.Graph(id="beta_fig8_inflbeta_vs_infllevel", config={"displaylogo": False}),
     ])
 
@@ -585,6 +585,39 @@ def render_tab_content(active_tab):
     if active_tab == TAB_INFL:    return inflation_section_layout()
     if active_tab == TAB_BETA:    return beta_section_layout()
     return html.Div()
+
+# ====== Dynamic section titles for Beta tab ======
+@callback(
+    Output("beta_title_1", "children"),
+    Output("beta_title_2", "children"),
+    Output("beta_title_3", "children"),
+    Output("beta_title_4", "children"),
+    Output("beta_title_5", "children"),
+    Output("beta_title_6", "children"),
+    Output("beta_title_7", "children"),
+    Output("beta_title_8", "children"),
+    Input("country", "value"),
+    Input("maturity", "value"),
+)
+def update_beta_section_titles(country_name, maturity):
+    if not country_name or not maturity:
+        return ("β — Regression: Country Vol vs Nominal Swap Vol",
+                "β — Regression: Country Vol vs Nominal Swap Vol — R² filter",
+                "β — Regression: Country Vol vs Inflation Swap Vol",
+                "β — Regression: Country Vol vs Inflation Swap Vol — R² filter",
+                "β (Country vs Swap Vol) — vs Diff level (Country − Swap) [bps] — heatmap + poly2",
+                "β (Country vs Swap Vol) — vs Swap level [bps] — heatmap + poly2",
+                "β (Country vs Inflation Vol) — vs Country level [bps] — heatmap + poly2",
+                "β (Country vs Inflation Vol) — vs Inflation swap level [bps] — heatmap + poly2")
+    code = used_prefix.get(country_name, country_name)  # e.g., "FR"
+    return (f"β — Regression: Country Vol ({code}) vs Nominal Swap Vol",
+            f"β — Regression: Country Vol ({code}) vs Nominal Swap Vol — R² filter",
+            f"β — Regression: Country Vol ({code}) vs Inflation Swap Vol",
+            f"β — Regression: Country Vol ({code}) vs Inflation Swap Vol — R² filter",
+            f"β ({code} vs Swap Vol) — vs Diff level ({code} − Swap) [bps] — heatmap + poly2",
+            f"β ({code} vs Swap Vol) — vs Swap level [bps] — heatmap + poly2",
+            f"β ({code} vs Inflation Vol) — vs {code} level [bps] — heatmap + poly2",
+            f"β ({code} vs Inflation Vol) — vs Inflation swap level [bps] — heatmap + poly2")
 
 # ============================
 # 6) CALLBACK — onglet Nominal
@@ -825,6 +858,7 @@ def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, 
     thr = float(r2_thr if r2_thr is not None else 0.7)
     beta_win = int(beta_win) if beta_win else 252
     key = (country_name, maturity, beta_win)
+    country_code = used_prefix.get(country_name, country_name)  # e.g., "FR"
 
     # ---- Get from cache or compute once ----
     if key in BETA_CACHE:
@@ -851,7 +885,7 @@ def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, 
     beta1 = beta1[beta1.between(lo_b, hi_b, inclusive="both")]
     fig1 = fig_single_series(
         y=beta1, idx=beta1.index,
-        title=f"β(t) — IT {maturity} Vol vs Swap {maturity} Vol — β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β(t) — {country_code} {maturity} Vol vs Swap {maturity} Vol — β∈[{lo_b:.2f},{hi_b:.2f}]",
         ylab="Beta", name="beta"
     )
 
@@ -859,7 +893,7 @@ def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, 
     sub2 = sub2[(sub2["r2"] >= thr) & (sub2["beta"].between(lo_b, hi_b, inclusive="both"))]
     fig2 = fig_single_series(
         y=sub2["beta"], idx=sub2.index,
-        title=f"β(t) — IT {maturity} Vol vs Swap {maturity} Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β(t) — {country_code} {maturity} Vol vs Swap {maturity} Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
         ylab="Beta", name="beta"
     )
 
@@ -867,7 +901,7 @@ def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, 
     beta3 = beta3[beta3.between(lo_b, hi_b, inclusive="both")]
     fig3 = fig_single_series(
         y=beta3, idx=beta3.index,
-        title=f"β(t) — IT {maturity} Vol vs Inflation Swap {maturity} Vol — β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β(t) — {country_code} {maturity} Vol vs Inflation Swap {maturity} Vol — β∈[{lo_b:.2f},{hi_b:.2f}]",
         ylab="Beta", name="beta"
     )
 
@@ -875,7 +909,7 @@ def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, 
     sub4 = sub4[(sub4["r2"] >= thr) & (sub4["beta"].between(lo_b, hi_b, inclusive="both"))]
     fig4 = fig_single_series(
         y=sub4["beta"], idx=sub4.index,
-        title=f"β(t) — IT {maturity} Vol vs Inflation Swap {maturity} Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β(t) — {country_code} {maturity} Vol vs Inflation Swap {maturity} Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
         ylab="Beta", name="beta"
     )
 
@@ -886,38 +920,38 @@ def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, 
     res_infl_f = res_infl.dropna(subset=["beta", "r2"])
     res_infl_f = res_infl_f[(res_infl_f["r2"] >= thr) & (res_infl_f["beta"].between(lo_b, hi_b, inclusive="both"))]
 
-    # 5) β (IT vs Swap Vol) vs diff level (IT − Swap)
+    # 5) β (Country vs Swap Vol) vs diff level (Country − Swap)
     diff_bps_f = (df["it_bps"] - df["sw_bps"]).reindex(res_swap_f.index)
     fig5 = fig_scatter_heatmap_with_poly(
         x=diff_bps_f, y=res_swap_f["beta"], index=res_swap_f.index,
-        title=f"β vs Diff level (IT − Swap) — IT {maturity} Vol vs Swap Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β vs Diff level ({country_code} − Swap) — {country_code} {maturity} Vol vs Swap Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
         xlab="Diff level (bps)", ylab="Beta", poly_deg=2,
         beta_bounds=(lo_b, hi_b)
     )
 
-    # 6) β (IT vs Swap Vol) vs Swap level
+    # 6) β (Country vs Swap Vol) vs Swap level
     sw_level_on_beta_idx_f = df["sw_bps"].reindex(res_swap_f.index)
     fig6 = fig_scatter_heatmap_with_poly(
         x=sw_level_on_beta_idx_f, y=res_swap_f["beta"], index=res_swap_f.index,
-        title=f"β vs Swap {maturity} level (bps) — IT Vol vs Swap Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β vs Swap {maturity} level (bps) — {country_code} Vol vs Swap Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
         xlab=f"Swap {maturity} (bps)", ylab="Beta", poly_deg=2,
         beta_bounds=(lo_b, hi_b)
     )
 
-    # 7) β (IT vs Inflation Vol) vs Country level
+    # 7) β (Country vs Inflation Vol) vs Country level
     it_level_on_beta_idx_f = df["it_bps"].reindex(res_infl_f.index)
     fig7 = fig_scatter_heatmap_with_poly(
         x=it_level_on_beta_idx_f, y=res_infl_f["beta"], index=res_infl_f.index,
-        title=f"β vs {country_name} {maturity} level (bps) — IT Vol vs Inflation Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
-        xlab=f"{country_name} {maturity} (bps)", ylab="Beta", poly_deg=2,
+        title=f"β vs {country_code} {maturity} level (bps) — {country_code} Vol vs Inflation Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        xlab=f"{country_code} {maturity} (bps)", ylab="Beta", poly_deg=2,
         beta_bounds=(lo_b, hi_b)
     )
 
-    # 8) β (IT vs Inflation Vol) vs Inflation swap level
+    # 8) β (Country vs Inflation Vol) vs Inflation swap level
     infl_level_on_beta_idx_f = df["infl_bps"].reindex(res_infl_f.index)
     fig8 = fig_scatter_heatmap_with_poly(
         x=infl_level_on_beta_idx_f, y=res_infl_f["beta"], index=res_infl_f.index,
-        title=f"β vs Inflation Swap {maturity} level (bps) — IT Vol vs Inflation Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        title=f"β vs Inflation Swap {maturity} level (bps) — {country_code} Vol vs Inflation Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
         xlab=f"Inflation Swap {maturity} (bps)", ylab="Beta", poly_deg=2,
         beta_bounds=(lo_b, hi_b)
     )
