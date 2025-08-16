@@ -1,0 +1,948 @@
+# -*- coding: utf-8 -*-
+import math
+import re
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+import dash
+from dash import Dash, dcc, html, Input, Output, callback
+import plotly.graph_objs as go
+import statsmodels.api as sm  # <-- for OLS rolling beta
+from datetime import datetime
+
+# ============================
+# CONFIG
+# ============================
+MATURITIES = ["2Y", "5Y", "10Y", "15Y", "20Y"]
+PERIODS_PER_YEAR = 252
+ROLLING_WINDOW_VOL = 252          # vol annualisée 1Y (strict 252)
+VOL_LABEL = "1Y"                  # pour nommer les colonnes de vol
+DEFAULT_VOL_RATIO_RANGE = (0.0, 10.0)
+
+TAB_NOMINAL = "tab_nominal"
+TAB_INFL = "tab_inflation"
+TAB_BETA = "tab_beta"
+
+COUNTRY_NAME_MAP = {
+    "FR": "France", "IT": "Italy", "DE": "Germany", "ES": "Spain", "PT": "Portugal",
+    "GR": "Greece", "IE": "Ireland", "BE": "Belgium", "NL": "Netherlands",
+    "AT": "Austria", "FI": "Finland",
+}
+
+# === simple in-memory cache for rolling regressions ===
+# key: (country, maturity, beta_window) -> {"res_swap": DataFrame, "res_infl": DataFrame, "cached_at": datetime}
+BETA_CACHE: Dict[Tuple[str, str, int], Dict[str, pd.DataFrame]] = {}
+
+# ============================
+# 0) COLLECTE DES INPUTS (depuis tes variables)
+# ============================
+def _get_global_df(var_names: List[str]) -> Optional[pd.DataFrame]:
+    g = globals()
+    for name in var_names:
+        if name in g and isinstance(g[name], pd.DataFrame):
+            return g[name]
+    return None
+
+def collect_inputs_from_globals() -> Tuple[Dict[str, pd.DataFrame], pd.DataFrame, pd.DataFrame]:
+    swap = _get_global_df(["df_Swap"])
+    infl = _get_global_df(["df_Inflation_Swap", "df_Inflation_Swaps"])
+    if swap is None:
+        raise ValueError("Missing required DataFrame: df_Swap")
+    if infl is None:
+        raise ValueError("Missing required DataFrame: df_Inflation_Swap (or df_Inflation_Swaps)")
+
+    countries: Dict[str, pd.DataFrame] = {}
+    for var, val in list(globals().items()):
+        if not isinstance(val, pd.DataFrame):
+            continue
+        m = re.fullmatch(r"df_([A-Za-z]{2})", var)   # df_FR, df_IT, ...
+        if m:
+            code = m.group(1).upper()
+            label = COUNTRY_NAME_MAP.get(code, code)
+            countries[label] = val
+
+    if not countries:
+        raise ValueError("No country DataFrames found (expected variables like df_FR, df_IT, ...)")
+    return countries, swap, infl
+
+# ============================
+# 1) HELPERS — pré-traitements
+# ============================
+def ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+    return df.sort_index()
+
+def infer_prefix_from_columns(df: pd.DataFrame, maturities: List[str]) -> Optional[str]:
+    for c in df.columns:
+        for m in maturities:
+            if c.endswith("_" + m):
+                return c[: -len(m) - 1]
+    return None
+
+def list_existing_maturities(df: pd.DataFrame, prefix: str, maturities: List[str]) -> List[str]:
+    return [m for m in maturities if f"{prefix}_{m}" in df.columns]
+
+def convert_percent_to_bps(df: pd.DataFrame, prefix: str, maturities: List[str]) -> pd.DataFrame:
+    out = df.copy()
+    for m in list_existing_maturities(out, prefix, maturities):
+        out[f"{prefix}_{m}_bps"] = pd.to_numeric(out[f"{prefix}_{m}"], errors="coerce") * 100.0  # 1% = 100 bps
+    return out
+
+def add_rolling_annualized_vol_bps(
+    df: pd.DataFrame,
+    prefix: str,
+    maturities: List[str],
+    window: int = ROLLING_WINDOW_VOL,      # STRICT 252
+    periods_per_year: int = PERIODS_PER_YEAR,
+    vol_label: str = VOL_LABEL,
+) -> pd.DataFrame:
+    """
+    EXACTEMENT comme tes snippets:
+      dx = diff(bps)
+      vol = std( dx, rolling WINDOW=252, min_periods=252 ) * sqrt(252)
+    """
+    out = df.copy()
+    for m in list_existing_maturities(out, prefix, maturities):
+        bps_col = f"{prefix}_{m}_bps"
+        if bps_col in out.columns:
+            x = pd.to_numeric(out[bps_col], errors="coerce")
+            dx = x.diff()
+            vol = dx.rolling(window=window, min_periods=window).std() * math.sqrt(periods_per_year)
+            out[f"{VOL_LABEL}_Vol_{prefix}_{m}"] = vol
+    return out
+
+def process_curve_df(
+    df: pd.DataFrame,
+    prefix: Optional[str],
+    maturities: List[str],
+    window: int = ROLLING_WINDOW_VOL,
+    periods_per_year: int = PERIODS_PER_YEAR,
+    vol_label: str = VOL_LABEL,
+) -> Tuple[pd.DataFrame, str]:
+    df = ensure_datetime_index(df)
+    if prefix is None:
+        prefix = infer_prefix_from_columns(df, maturities)
+        if prefix is None:
+            raise ValueError("Could not infer prefix from columns (ex: IT, FR, Swap, Inflation_Swap).")
+    out = convert_percent_to_bps(df, prefix, maturities)
+    out = add_rolling_annualized_vol_bps(out, prefix, maturities, window, periods_per_year, vol_label)
+    return out, prefix
+
+def add_diff_vs_swap(
+    df_country: pd.DataFrame,
+    country_prefix: str,
+    df_swap: pd.DataFrame,
+    swap_prefix: str,
+    maturities: List[str],
+) -> pd.DataFrame:
+    out = df_country.copy()
+    for m in list_existing_maturities(out, country_prefix, maturities):
+        c_bps = f"{country_prefix}_{m}_bps"
+        s_bps = f"{swap_prefix}_{m}_bps"
+        if c_bps in out.columns and s_bps in df_swap.columns:
+            out[f"diff_bps_{m}_{country_prefix}_Swap"] = out[c_bps] - df_swap[s_bps].reindex(out.index)
+    return out
+
+def rolling_corr_strict(s1: pd.Series, s2: pd.Series, window: int) -> pd.Series:
+    # align strict + min_periods=window
+    join = pd.concat([s1.rename("a"), s2.rename("b")], axis=1).dropna()
+    if join.empty:
+        return pd.Series(dtype=float)
+    return join["a"].rolling(window=window, min_periods=window).corr(join["b"])
+
+# === Rolling OLS (beta, t, r2) ===
+def rolling_ols_single(y: pd.Series, x: pd.Series, window: int) -> pd.DataFrame:
+    """
+    y, x: Series alignées sur le temps (inner join ici)
+    Retourne DataFrame indexé par fin de fenêtre: beta, tstat, r2
+    """
+    data = pd.concat([y.rename("y"), x.rename("x")], axis=1).dropna()
+    if len(data) < max(5, window):
+        return pd.DataFrame(index=pd.DatetimeIndex([]), columns=["beta", "tstat", "r2"])
+
+    rows, idxs = [], []
+    for i in range(window-1, len(data)):
+        win = data.iloc[i-window+1:i+1]
+        X = sm.add_constant(win["x"], has_constant='add')
+        try:
+            fit = sm.OLS(win["y"], X, missing="drop").fit()
+            rows.append({
+                "beta": float(fit.params.get("x", np.nan)),
+                "tstat": float(fit.tvalues.get("x", np.nan)),
+                "r2": float(fit.rsquared),
+            })
+            idxs.append(win.index[-1])
+        except Exception:
+            continue
+    return pd.DataFrame(rows, index=pd.DatetimeIndex(idxs))
+
+# ============================
+# 2) PRÉPARATION GLOBALE (au démarrage)
+# ============================
+countries_raw, df_Swap_raw, df_Infl_raw = collect_inputs_from_globals()
+
+countries_proc: Dict[str, pd.DataFrame] = {}
+used_prefix: Dict[str, str] = {}
+
+swap_proc, SWAP_PREFIX = process_curve_df(df_Swap_raw, prefix=None, maturities=MATURITIES)
+infl_proc, INFL_PREFIX = process_curve_df(df_Infl_raw, prefix=None, maturities=MATURITIES)
+
+for cname, cdf in countries_raw.items():
+    c_proc, pfx = process_curve_df(cdf, prefix=None, maturities=MATURITIES)
+    used_prefix[cname] = pfx
+    c_proc = add_diff_vs_swap(c_proc, pfx, swap_proc, SWAP_PREFIX, MATURITIES)
+    countries_proc[cname] = c_proc
+
+ALL_COUNTRIES = list(countries_proc.keys())
+ALL_MATURITIES = MATURITIES[:]
+
+# ============================
+# 3) VUE (pays+maturité)
+# ============================
+def build_selection_df(
+    country_name: str, maturity: str,
+    countries_proc: Dict[str, pd.DataFrame], used_prefix: Dict[str, str],
+    swap_proc: pd.DataFrame, swap_prefix: str
+) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    if country_name not in countries_proc:
+        return None, f"No data found for {country_name} {maturity}"
+    cdf = countries_proc[country_name]
+    pfx = used_prefix[country_name]
+
+    needed = [
+        f"{pfx}_{maturity}", f"{pfx}_{maturity}_bps", f"{VOL_LABEL}_Vol_{pfx}_{maturity}",
+        f"{swap_prefix}_{maturity}", f"{swap_prefix}_{maturity}_bps", f"{VOL_LABEL}_Vol_{swap_prefix}_{maturity}",
+        f"diff_bps_{maturity}_{pfx}_Swap",
+    ]
+    have = set(cdf.columns).union(set(swap_proc.columns))
+    if not set(needed).issubset(have):
+        return None, f"No data found for {country_name} {maturity}"
+
+    df = pd.DataFrame(index=cdf.index)
+    mapping = {
+        "it_level_pct": f"{pfx}_{maturity}",
+        "it_bps": f"{pfx}_{maturity}_bps",
+        "it_vol_bps": f"{VOL_LABEL}_Vol_{pfx}_{maturity}",
+        "sw_level_pct": f"{swap_prefix}_{maturity}",
+        "sw_bps": f"{swap_prefix}_{maturity}_bps",
+        "sw_vol_bps": f"{VOL_LABEL}_Vol_{swap_prefix}_{maturity}",
+        "diff_bps": f"diff_bps_{maturity}_{pfx}_Swap",
+    }
+    for alias, col in mapping.items():
+        if col in cdf.columns:
+            df[alias] = cdf[col]
+        elif col in swap_proc.columns:
+            df[alias] = swap_proc[col].reindex(df.index)
+        else:
+            df[alias] = np.nan
+
+    df["vol_ratio"] = df["it_vol_bps"] / df["sw_vol_bps"]
+    df["diff_vol_bps"] = df["it_vol_bps"] - df["sw_vol_bps"]
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+
+    # petits filtres
+    df["Level_Ratio"] = df["it_bps"] / df["sw_bps"]
+    df = df[(df["Level_Ratio"] > 0) & (df["Level_Ratio"] <= 10)]
+    return df, None if not df.empty else f"No data found for {country_name} {maturity}"
+
+def build_selection_df_infl(
+    country_name: str, maturity: str,
+    countries_proc: Dict[str, pd.DataFrame], used_prefix: Dict[str, str],
+    swap_proc: pd.DataFrame, infl_proc: pd.DataFrame,
+    swap_prefix: str, infl_prefix: str
+) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    if country_name not in countries_proc:
+        return None, f"No data found for {country_name} {maturity}"
+    cdf = countries_proc[country_name]
+    pfx = used_prefix[country_name]
+
+    needed = [
+        f"{infl_prefix}_{maturity}", f"{infl_prefix}_{maturity}_bps", f"{VOL_LABEL}_Vol_{infl_prefix}_{maturity}",
+        f"{swap_prefix}_{maturity}", f"{swap_prefix}_{maturity}_bps", f"{VOL_LABEL}_Vol_{swap_prefix}_{maturity}",
+        f"{pfx}_{maturity}", f"{pfx}_{maturity}_bps", f"{VOL_LABEL}_Vol_{pfx}_{maturity}",
+    ]
+    have = set(infl_proc.columns).union(set(swap_proc.columns)).union(set(cdf.columns))
+    if not set(needed).issubset(have):
+        return None, f"No data found for Inflation Swap / {country_name} {maturity}"
+
+    idx = cdf.index.union(swap_proc.index).union(infl_proc.index)
+    df = pd.DataFrame(index=idx)
+
+    # Inflation swap
+    df["infl_bps"] = infl_proc.get(f"{infl_prefix}_{maturity}_bps").reindex(df.index)
+    df["infl_vol_bps"] = infl_proc.get(f"{VOL_LABEL}_Vol_{infl_prefix}_{maturity}").reindex(df.index)
+
+    # Nominal swap
+    df["sw_bps"] = swap_proc.get(f"{swap_prefix}_{maturity}_bps").reindex(df.index)
+    df["sw_vol_bps"] = swap_proc.get(f"{VOL_LABEL}_Vol_{swap_prefix}_{maturity}").reindex(df.index)
+
+    # Country (ex: IT)
+    df["it_bps"] = cdf.get(f"{pfx}_{maturity}_bps").reindex(df.index)
+    df["it_vol_bps"] = cdf.get(f"{VOL_LABEL}_Vol_{pfx}_{maturity}").reindex(df.index)
+
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df = df.sort_index()
+    core = ["infl_bps", "infl_vol_bps", "sw_bps", "sw_vol_bps", "it_bps", "it_vol_bps"]
+    if df[core].dropna(how="any").empty:
+        return None, f"No data found for Inflation Swap / {country_name} {maturity}"
+    return df, None
+
+# ============================
+# 4) FIGURES
+# ============================
+def fig_scatter_heatmap_with_poly(
+    x: pd.Series, y: pd.Series, index: pd.DatetimeIndex,
+    title: str, xlab: str, ylab: str,
+    ratio_bounds: Optional[Tuple[float, float]] = None,
+    beta_bounds: Optional[Tuple[float, float]] = None,
+    poly_deg: int = 2,
+) -> go.Figure:
+    dfp = pd.DataFrame({"x": x, "y": y}, index=pd.to_datetime(index)).dropna()
+    if ratio_bounds is not None:
+        lo, hi = ratio_bounds
+        dfp = dfp[(dfp["x"] > lo) & (dfp["x"] < hi)]
+    if beta_bounds is not None:
+        lo_b, hi_b = beta_bounds
+        dfp = dfp[(dfp["y"] > lo_b) & (dfp["y"] < hi_b)]
+
+    fig = go.Figure()
+    fig.update_layout(
+        title=title, xaxis_title=xlab, yaxis_title=ylab, template="plotly_white",
+        margin=dict(l=50, r=70, t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    if beta_bounds is not None:
+        fig.update_yaxes(range=[beta_bounds[0], beta_bounds[1]])
+
+    if dfp.empty:
+        return fig
+
+    years = dfp.index.year
+    cmin, cmax = int(years.min()), int(years.max())
+
+    fig.add_trace(go.Scatter(
+        x=dfp["x"], y=dfp["y"], mode="markers",
+        marker=dict(
+            size=6,
+            color=years,
+            colorscale="RdBu_r",   # récent = rouge
+            cmin=cmin, cmax=cmax, showscale=True,
+            colorbar=dict(title="Year", x=1.02)
+        ),
+        hovertemplate="x=%{x:.3f}<br>y=%{y:.3f}<extra></extra>",
+        showlegend=False
+    ))
+
+    if len(dfp) >= (poly_deg + 1):
+        try:
+            xs = dfp["x"].values
+            ys = dfp["y"].values
+            order = np.argsort(xs)
+            xs_sorted, ys_sorted = xs[order], ys[order]
+            coeffs = np.polyfit(xs_sorted, ys_sorted, deg=poly_deg)
+            x_line = np.linspace(xs_sorted.min(), xs_sorted.max(), 300)
+            y_line = np.polyval(coeffs, x_line)
+            fig.add_trace(go.Scatter(
+                x=x_line, y=y_line, mode="lines",
+                line=dict(color="black", width=2),
+                name=f"Poly fit (deg={poly_deg})",
+                hoverinfo="skip"
+            ))
+        except Exception:
+            pass
+
+    return fig
+
+def fig_timeseries_two(y1, y2, idx, name1, name2, title, ylab, secondary_y=False):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=idx, y=y1, mode="lines", name=name1))
+    if secondary_y:
+        fig.add_trace(go.Scatter(x=idx, y=y2, mode="lines", name=name2, yaxis="y2"))
+        fig.update_layout(
+            yaxis=dict(title=ylab),
+            yaxis2=dict(title=name2, overlaying="y", side="right", showgrid=False),
+        )
+    else:
+        fig.add_trace(go.Scatter(x=idx, y=y2, mode="lines", name=name2))
+        fig.update_layout(yaxis=dict(title=ylab))
+    fig.update_layout(
+        title=title, template="plotly_white",
+        xaxis=dict(tickformat="%Y"),
+        margin=dict(l=50, r=20, t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+def fig_timeseries_three(idx, y1, y2, y3, n1, n2, n3, title, ylab):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=idx, y=y1, mode="lines", name=n1))
+    fig.add_trace(go.Scatter(x=idx, y=y2, mode="lines", name=n2))
+    fig.add_trace(go.Scatter(x=idx, y=y3, mode="lines", name=n3))
+    fig.update_layout(
+        title=title, template="plotly_white",
+        xaxis=dict(tickformat="%Y"),
+        yaxis=dict(title=ylab),
+        margin=dict(l=50, r=20, t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+def fig_single_series(y, idx, title, ylab, name=None):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=idx, y=y, mode="lines", name=name or "series"))
+    fig.update_layout(
+        title=title,
+        xaxis=dict(tickformat="%Y"),
+        yaxis=dict(title=ylab),
+        template="plotly_white",
+        margin=dict(l=50, r=20, t=50, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    return fig
+
+# ============================
+# 5) APP
+# ============================
+app: Dash = dash.Dash(__name__)
+app.title = "Rates Vol Dashboard"
+
+def build_country_options():
+    return [{"label": c, "value": c} for c in sorted(ALL_COUNTRIES)]
+
+def build_maturity_options():
+    return [{"label": m, "value": m} for m in ALL_MATURITIES]
+
+app.layout = html.Div([
+    html.H2("Rates Vol Dashboard"),
+    html.Div([
+        html.Div([
+            html.Label("Maturity"),
+            dcc.RadioItems(
+                id="maturity",
+                options=build_maturity_options(),
+                value=("10Y" if "10Y" in ALL_MATURITIES else (ALL_MATURITIES[0] if ALL_MATURITIES else None)),
+                inline=True
+            ),
+        ], style={"display": "inline-block", "marginRight": "32px"}),
+
+        html.Div([
+            html.Label("Country"),
+            dcc.RadioItems(
+                id="country",
+                options=build_country_options(),
+                value=("Italy" if "Italy" in ALL_COUNTRIES else sorted(ALL_COUNTRIES)[0]),
+                inline=True
+            ),
+        ], style={"display": "inline-block", "marginRight": "32px"}),
+
+        html.Div([
+            html.Label("Rolling Corr Window"),
+            dcc.RadioItems(
+                id="corr-window",
+                options=[
+                    {"label": "3M (63)", "value": 63},
+                    {"label": "6M (126)", "value": 126},
+                    {"label": "1Y (252)", "value": 252},
+                ],
+                value=252,
+                inline=True
+            ),
+        ], style={"display": "inline-block", "marginRight": "32px"}),
+
+        html.Div([
+            html.Label("Beta Regression Window"),
+            dcc.RadioItems(
+                id="beta-window",
+                options=[
+                    {"label": "3M (63)", "value": 63},
+                    {"label": "6M (126)", "value": 126},
+                    {"label": "1Y (252)", "value": 252},
+                ],
+                value=252,
+                inline=True
+            ),
+        ], style={"display": "inline-block"}),
+    ], style={"marginBottom": "12px"}),
+
+    html.Div([
+        html.Label("Vol Ratio bounds"),
+        dcc.RangeSlider(
+            id="vol-ratio-bounds",
+            min=0.0, max=10.0, step=0.5,
+            allowCross=False,
+            value=list(DEFAULT_VOL_RATIO_RANGE),
+            marks={i: str(i) for i in range(0, 11, 1)}
+        )
+    ], style={"marginTop": "6px", "marginBottom": "16px"}),
+
+    html.Div([
+        html.Label("Beta bounds"),
+        dcc.RangeSlider(
+            id="beta-bounds",
+            min=-4, max=10, step=0.5,
+            allowCross=False,
+            value=[-1, 3],  # default tightened
+            marks={i: str(i) for i in range(-4, 11, 2)}
+        )
+    ], style={"marginTop": "0px", "marginBottom": "12px"}),
+
+    html.Div([
+        html.Label("R² threshold (for filtered beta charts)"),
+        dcc.Slider(
+            id="r2-threshold",
+            min=0.0, max=1.0, step=0.05,
+            value=0.70,  # default tightened
+            marks={0.0:"0.0", 0.5:"0.5", 0.7:"0.7", 1.0:"1.0"},
+            tooltip={"placement":"bottom", "always_visible":False}
+        ),
+    ], style={"marginBottom": "20px"}),
+
+    html.Div(id="data-warning", style={"color": "crimson", "marginBottom": "10px"}),
+
+    dcc.Tabs(id="active-tab", value=TAB_NOMINAL, children=[
+        dcc.Tab(label="Vol Analysis vs Nominal Swaps", value=TAB_NOMINAL),
+        dcc.Tab(label="Vol Analysis vs Inflation Swaps", value=TAB_INFL),
+        dcc.Tab(label="Beta Analysis", value=TAB_BETA),
+    ]),
+
+    html.Div(id="tab-content", style={"marginTop": "12px"}),
+])
+
+def nominal_section_layout():
+    return html.Div([
+        html.H4("1) Country Vol vs Level (heatmap-style scatter + poly2)"),
+        dcc.Graph(id="fig1_it", config={"displaylogo": False}),
+        html.H4("2) Swap Vol vs Level (heatmap-style scatter + poly2)"),
+        dcc.Graph(id="fig2_swap", config={"displaylogo": False}),
+        html.H4("3) Vol Ratio vs Diff (bps) — respects slider"),
+        dcc.Graph(id="fig3_ratio_vs_diff", config={"displaylogo": False}),
+        html.H4("4) Diff Vol (bps) vs Diff (bps)"),
+        dcc.Graph(id="fig4_diffvol_vs_diff", config={"displaylogo": False}),
+        html.H4("5) Rolling corr(Vol Country, Vol Swap) + Spread (bps, right axis)"),
+        dcc.Graph(id="fig5_corr_spread", config={"displaylogo": False}),
+        html.H4("6) Time series: Country vs Swap Vol (bps)"),
+        dcc.Graph(id="fig6_vol_ts", config={"displaylogo": False}),
+        html.H4("7) Time series: Country vs Swap Level (bps)"),
+        dcc.Graph(id="fig7_level_ts", config={"displaylogo": False}),
+        html.H4("8) Time series: Vol Ratio (respects slider bounds)"),
+        dcc.Graph(id="fig8_ratio_ts", config={"displaylogo": False}),
+    ])
+
+def inflation_section_layout():
+    return html.Div([
+        html.H4("1) Inflation Swap Vol vs Inflation Swap Level (heatmap + poly2)"),
+        dcc.Graph(id="infl_fig1_vs_infl_level", config={"displaylogo": False}),
+        html.H4("2) Inflation Swap Vol vs Nominal Swap Level (heatmap + poly2)"),
+        dcc.Graph(id="infl_fig2_vs_swap_level", config={"displaylogo": False}),
+        html.H4("3) Inflation Swap Vol vs Country Level (heatmap + poly2)"),
+        dcc.Graph(id="infl_fig3_vs_country_level", config={"displaylogo": False}),
+        html.H4("4) Rolling Corr: Inflation Swap Vol ↔ Nominal Swap Vol"),
+        dcc.Graph(id="infl_fig4_corr_infl_vs_swap", config={"displaylogo": False}),
+        html.H4("5) Rolling Corr: Inflation Swap Vol ↔ Country Vol"),
+        dcc.Graph(id="infl_fig5_corr_infl_vs_country", config={"displaylogo": False}),
+        html.H4("6) Time series: Vols — Inflation vs Nominal Swap vs Country"),
+        dcc.Graph(id="infl_fig6_vols_ts", config={"displaylogo": False}),
+        html.H4("7) Time series: Levels — Inflation vs Nominal Swap vs Country"),
+        dcc.Graph(id="infl_fig7_levels_ts", config={"displaylogo": False}),
+    ])
+
+def beta_section_layout():
+    return html.Div([
+        html.H4("β — Regression: Country Vol (IT) vs Nominal Swap Vol"),
+        dcc.Graph(id="beta_fig1_swap_beta_ts", config={"displaylogo": False}),
+        html.H4("β — Regression: Country Vol (IT) vs Nominal Swap Vol — R² filter"),
+        dcc.Graph(id="beta_fig2_swap_beta_ts_r2", config={"displaylogo": False}),
+
+        html.H4("β — Regression: Country Vol (IT) vs Inflation Swap Vol"),
+        dcc.Graph(id="beta_fig3_infl_beta_ts", config={"displaylogo": False}),
+        html.H4("β — Regression: Country Vol (IT) vs Inflation Swap Vol — R² filter"),
+        dcc.Graph(id="beta_fig4_infl_beta_ts_r2", config={"displaylogo": False}),
+
+        html.H4("β (IT vs Swap Vol) — vs Diff level (IT − Swap) [bps] — heatmap + poly2"),
+        dcc.Graph(id="beta_fig5_swap_beta_vs_diff", config={"displaylogo": False}),
+        html.H4("β (IT vs Swap Vol) — vs Swap level [bps] — heatmap + poly2"),
+        dcc.Graph(id="beta_fig6_swap_beta_vs_swlevel", config={"displaylogo": False}),
+
+        html.H4("β (IT vs Inflation Vol) — vs Country level [bps] — heatmap + poly2"),
+        dcc.Graph(id="beta_fig7_inflbeta_vs_itlevel", config={"displaylogo": False}),
+        html.H4("β (IT vs Inflation Vol) — vs Inflation swap level [bps] — heatmap + poly2"),
+        dcc.Graph(id="beta_fig8_inflbeta_vs_infllevel", config={"displaylogo": False}),
+    ])
+
+def placeholder_section_layout(title: str):
+    return html.Div([html.Div(f"{title} — coming soon 👷‍♂️",
+                              style={"fontStyle": "italic", "color": "#777", "padding": "12px"})])
+
+@callback(Output("tab-content", "children"), Input("active-tab", "value"))
+def render_tab_content(active_tab):
+    if active_tab == TAB_NOMINAL: return nominal_section_layout()
+    if active_tab == TAB_INFL:    return inflation_section_layout()
+    if active_tab == TAB_BETA:    return beta_section_layout()
+    return html.Div()
+
+# ============================
+# 6) CALLBACK — onglet Nominal
+# ============================
+@callback(
+    Output("data-warning", "children"),
+    Output("fig1_it", "figure"),
+    Output("fig2_swap", "figure"),
+    Output("fig3_ratio_vs_diff", "figure"),
+    Output("fig4_diffvol_vs_diff", "figure"),
+    Output("fig5_corr_spread", "figure"),
+    Output("fig6_vol_ts", "figure"),
+    Output("fig7_level_ts", "figure"),
+    Output("fig8_ratio_ts", "figure"),
+    Input("active-tab", "value"),
+    Input("country", "value"),
+    Input("maturity", "value"),
+    Input("vol-ratio-bounds", "value"),
+    Input("corr-window", "value"),
+)
+def update_nominal_figs(active_tab, country_name, maturity, ratio_bounds, corr_win):
+    empty = go.Figure()
+    if active_tab != TAB_NOMINAL:
+        return ("", empty, empty, empty, empty, empty, empty, empty, empty)
+
+    if country_name is None or maturity is None:
+        return ("Select a country and a maturity.", empty, empty, empty, empty, empty, empty, empty, empty)
+
+    df, err = build_selection_df(country_name, maturity, countries_proc, used_prefix, swap_proc, SWAP_PREFIX)
+    if err or df is None or df.empty:
+        return (err or f"No data found for {country_name} {maturity}", empty, empty, empty, empty, empty, empty, empty, empty)
+
+    core_cols = ["it_bps", "it_vol_bps", "sw_bps", "sw_vol_bps"]
+    df = df.dropna(subset=core_cols).copy()
+    if df.empty:
+        return (f"No data found for {country_name} {maturity}", empty, empty, empty, empty, empty, empty, empty, empty)
+
+    fig1 = fig_scatter_heatmap_with_poly(
+        x=df["it_bps"], y=df["it_vol_bps"], index=df.index,
+        title=f"{country_name} {maturity}: Vol(1Y, annualized) vs Level",
+        xlab=f"{country_name} {maturity} (bps)", ylab="Vol 1Y (bps, annualized)", poly_deg=2
+    )
+
+    fig2 = fig_scatter_heatmap_with_poly(
+        x=df["sw_bps"], y=df["sw_vol_bps"], index=df.index,
+        title=f"Swap {maturity}: Vol(1Y, annualized) vs Level",
+        xlab=f"Swap {maturity} (bps)", ylab="Vol 1Y (bps, annualized)", poly_deg=2
+    )
+
+    lo, hi = ratio_bounds if ratio_bounds and len(ratio_bounds) == 2 else DEFAULT_VOL_RATIO_RANGE
+    df_ratio = df[df["vol_ratio"].between(lo, hi, inclusive="both") & df["diff_bps"].notna()]
+    fig3 = fig_scatter_heatmap_with_poly(
+        x=df_ratio["diff_bps"], y=df_ratio["vol_ratio"], index=df_ratio.index,
+        title=f"Vol Ratio vs Diff (bps) — bounds [{lo:.1f}, {hi:.1f}]",
+        xlab=f"Diff level ({country_name} {maturity} − Swap {maturity}) [bps]",
+        ylab="Vol Ratio (Country / Swap)", poly_deg=2
+    )
+
+    df_diffv = df.dropna(subset=["diff_bps", "diff_vol_bps"])
+    fig4 = fig_scatter_heatmap_with_poly(
+        x=df_diffv["diff_bps"], y=df_diffv["diff_vol_bps"], index=df_diffv.index,
+        title="Diff vol (bps) vs Diff level (bps)",
+        xlab=f"Diff level ({country_name} {maturity} − Swap {maturity}) [bps]",
+        ylab="Diff vol (Country − Swap) [bps]", poly_deg=2
+    )
+
+    corr_series = rolling_corr_strict(
+        df["it_vol_bps"].rename("it_vol"),
+        df["sw_vol_bps"].rename("sw_vol"),
+        window=int(corr_win) if corr_win else 252
+    )
+    both = pd.concat([corr_series.rename("corr"), df["diff_bps"].rename("spread")], axis=1).dropna()
+    fig5 = fig_timeseries_two(
+        y1=both["corr"], y2=both["spread"], idx=both.index,
+        name1=f"Rolling Corr ({int(corr_win)}d)", name2="Spread (bps)",
+        title=f"Rolling Corr (Vols) + Spread — {country_name} {maturity}",
+        ylab="Correlation", secondary_y=True
+    )
+
+    fig6 = fig_timeseries_two(
+        y1=df["it_vol_bps"], y2=df["sw_vol_bps"], idx=df.index,
+        name1=f"{country_name} {maturity} vol 1Y (bps)",
+        name2=f"Swap {maturity} vol 1Y (bps)",
+        title="Vols 1Y (bps, annualized)", ylab="bps", secondary_y=False
+    )
+
+    fig7 = fig_timeseries_two(
+        y1=df["it_bps"], y2=df["sw_bps"], idx=df.index,
+        name1=f"{country_name} {maturity} (bps)",
+        name2=f"Swap {maturity} (bps)",
+        title="Levels (bps)", ylab="bps", secondary_y=False
+    )
+
+    fig8 = fig_single_series(
+        y=df_ratio["vol_ratio"], idx=df_ratio.index,
+        title=f"Vol Ratio time series — bounds [{lo:.1f}, {hi:.1f}]",
+        ylab="Vol Ratio", name="Vol Ratio"
+    )
+
+    return ("", fig1, fig2, fig3, fig4, fig5, fig6, fig7, fig8)
+
+# ============================
+# 7) CALLBACK — onglet Inflation Swaps
+# ============================
+@callback(
+    Output("infl_fig1_vs_infl_level", "figure"),
+    Output("infl_fig2_vs_swap_level", "figure"),
+    Output("infl_fig3_vs_country_level", "figure"),
+    Output("infl_fig4_corr_infl_vs_swap", "figure"),
+    Output("infl_fig5_corr_infl_vs_country", "figure"),
+    Output("infl_fig6_vols_ts", "figure"),
+    Output("infl_fig7_levels_ts", "figure"),
+    Input("active-tab", "value"),
+    Input("country", "value"),
+    Input("maturity", "value"),
+    Input("corr-window", "value"),
+)
+def update_inflation_figs(active_tab, country_name, maturity, corr_win):
+    empty = go.Figure()
+    if active_tab != TAB_INFL:
+        return (empty, empty, empty, empty, empty, empty, empty)
+    if country_name is None or maturity is None:
+        return (empty, empty, empty, empty, empty, empty, empty)
+
+    df, err = build_selection_df_infl(
+        country_name, maturity,
+        countries_proc, used_prefix,
+        swap_proc, infl_proc,
+        SWAP_PREFIX, INFL_PREFIX
+    )
+    if err or df is None or df.empty:
+        return (empty, empty, empty, empty, empty, empty, empty)
+
+    fig1 = fig_scatter_heatmap_with_poly(
+        x=df["infl_bps"], y=df["infl_vol_bps"], index=df.index,
+        title=f"Inflation Swap {maturity}: Vol(1Y) vs Level",
+        xlab=f"Inflation Swap {maturity} (bps)", ylab="Inflation Vol 1Y (bps)", poly_deg=2
+    )
+
+    fig2 = fig_scatter_heatmap_with_poly(
+        x=df["sw_bps"], y=df["infl_vol_bps"], index=df.index,
+        title=f"Inflation Swap {maturity} Vol vs Nominal Swap {maturity} Level",
+        xlab=f"Nominal Swap {maturity} (bps)", ylab="Inflation Vol 1Y (bps)", poly_deg=2
+    )
+
+    fig3 = fig_scatter_heatmap_with_poly(
+        x=df["it_bps"], y=df["infl_vol_bps"], index=df.index,
+        title=f"Inflation Swap {maturity} Vol vs {country_name} {maturity} Level",
+        xlab=f"{country_name} {maturity} (bps)", ylab="Inflation Vol 1Y (bps)", poly_deg=2
+    )
+
+    corr1 = rolling_corr_strict(
+        df["infl_vol_bps"].rename("infl_vol"),
+        df["sw_vol_bps"].rename("swap_vol"),
+        window=int(corr_win) if corr_win else 252
+    )
+    fig4 = fig_single_series(
+        y=corr1, idx=corr1.index,
+        title=f"Rolling Corr ({int(corr_win)}d): Inflation Vol ↔ Nominal Swap Vol",
+        ylab="Correlation", name="corr"
+    )
+
+    corr2 = rolling_corr_strict(
+        df["infl_vol_bps"].rename("infl_vol"),
+        df["it_vol_bps"].rename("country_vol"),
+        window=int(corr_win) if corr_win else 252
+    )
+    fig5 = fig_single_series(
+        y=corr2, idx=corr2.index,
+        title=f"Rolling Corr ({int(corr_win)}d): Inflation Vol ↔ {country_name} Vol",
+        ylab="Correlation", name="corr"
+    )
+
+    common_idx = df[["infl_vol_bps", "sw_vol_bps", "it_vol_bps"]].dropna().index
+    fig6 = fig_timeseries_three(
+        idx=common_idx,
+        y1=df.loc[common_idx, "infl_vol_bps"],
+        y2=df.loc[common_idx, "sw_vol_bps"],
+        y3=df.loc[common_idx, "it_vol_bps"],
+        n1="Inflation vol 1Y (bps)",
+        n2=f"Swap {maturity} vol 1Y (bps)",
+        n3=f"{country_name} {maturity} vol 1Y (bps)",
+        title="Vols 1Y (bps, annualized) — Inflation vs Nominal Swap vs Country",
+        ylab="bps"
+    )
+
+    common_idx2 = df[["infl_bps", "sw_bps", "it_bps"]].dropna().index
+    fig7 = fig_timeseries_three(
+        idx=common_idx2,
+        y1=df.loc[common_idx2, "infl_bps"],
+        y2=df.loc[common_idx2, "sw_bps"],
+        y3=df.loc[common_idx2, "it_bps"],
+        n1="Inflation level (bps)",
+        n2=f"Swap {maturity} (bps)",
+        n3=f"{country_name} {maturity} (bps)",
+        title="Levels (bps) — Inflation vs Nominal Swap vs Country",
+        ylab="bps"
+    )
+
+    return (fig1, fig2, fig3, fig4, fig5, fig6, fig7)
+
+# ============================
+# 8) CALLBACK — onglet Beta Analysis (with caching)
+# ============================
+@callback(
+    Output("beta_fig1_swap_beta_ts", "figure"),
+    Output("beta_fig2_swap_beta_ts_r2", "figure"),
+    Output("beta_fig3_infl_beta_ts", "figure"),
+    Output("beta_fig4_infl_beta_ts_r2", "figure"),
+    Output("beta_fig5_swap_beta_vs_diff", "figure"),
+    Output("beta_fig6_swap_beta_vs_swlevel", "figure"),
+    Output("beta_fig7_inflbeta_vs_itlevel", "figure"),
+    Output("beta_fig8_inflbeta_vs_infllevel", "figure"),
+    Input("active-tab", "value"),
+    Input("country", "value"),
+    Input("maturity", "value"),
+    Input("beta-window", "value"),   # recompute only if these 3 change -> new cache key
+    Input("beta-bounds", "value"),   # fast filter using cached results
+    Input("r2-threshold", "value"),  # fast filter using cached results
+)
+def update_beta_figs(active_tab, country_name, maturity, beta_win, beta_bounds, r2_thr):
+    empty = go.Figure()
+    if active_tab != TAB_BETA:
+        return (empty, empty, empty, empty, empty, empty, empty, empty)
+    if (country_name is None) or (maturity is None):
+        return (empty, empty, empty, empty, empty, empty, empty, empty)
+
+    # ---- Base data (cheap) ----
+    df, err = build_selection_df_infl(
+        country_name, maturity,
+        countries_proc, used_prefix,
+        swap_proc, infl_proc,
+        SWAP_PREFIX, INFL_PREFIX
+    )
+    if err or df is None or df.empty:
+        return (empty, empty, empty, empty, empty, empty, empty, empty)
+
+    thr = float(r2_thr if r2_thr is not None else 0.7)
+    beta_win = int(beta_win) if beta_win else 252
+    key = (country_name, maturity, beta_win)
+
+    # ---- Get from cache or compute once ----
+    if key in BETA_CACHE:
+        res_swap = BETA_CACHE[key]["res_swap"]
+        res_infl = BETA_CACHE[key]["res_infl"]
+    else:
+        # heavy part (only when country/maturity/window change)
+        res_swap = rolling_ols_single(df["it_vol_bps"], df["sw_vol_bps"], beta_win)
+        res_infl = rolling_ols_single(df["it_vol_bps"], df["infl_vol_bps"], beta_win)
+        BETA_CACHE[key] = {
+            "res_swap": res_swap,
+            "res_infl": res_infl,
+            "cached_at": datetime.utcnow(),
+        }
+
+    # bounds
+    if isinstance(beta_bounds, (list, tuple)) and len(beta_bounds) == 2:
+        lo_b, hi_b = float(beta_bounds[0]), float(beta_bounds[1])
+    else:
+        lo_b, hi_b = -1.0, 3.0
+
+    # === time series ===
+    beta1 = res_swap["beta"].copy()
+    beta1 = beta1[beta1.between(lo_b, hi_b, inclusive="both")]
+    fig1 = fig_single_series(
+        y=beta1, idx=beta1.index,
+        title=f"β(t) — IT {maturity} Vol vs Swap {maturity} Vol — β∈[{lo_b:.2f},{hi_b:.2f}]",
+        ylab="Beta", name="beta"
+    )
+
+    sub2 = res_swap.dropna(subset=["beta", "r2"]).copy()
+    sub2 = sub2[(sub2["r2"] >= thr) & (sub2["beta"].between(lo_b, hi_b, inclusive="both"))]
+    fig2 = fig_single_series(
+        y=sub2["beta"], idx=sub2.index,
+        title=f"β(t) — IT {maturity} Vol vs Swap {maturity} Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        ylab="Beta", name="beta"
+    )
+
+    beta3 = res_infl["beta"].copy()
+    beta3 = beta3[beta3.between(lo_b, hi_b, inclusive="both")]
+    fig3 = fig_single_series(
+        y=beta3, idx=beta3.index,
+        title=f"β(t) — IT {maturity} Vol vs Inflation Swap {maturity} Vol — β∈[{lo_b:.2f},{hi_b:.2f}]",
+        ylab="Beta", name="beta"
+    )
+
+    sub4 = res_infl.dropna(subset=["beta", "r2"]).copy()
+    sub4 = sub4[(sub4["r2"] >= thr) & (sub4["beta"].between(lo_b, hi_b, inclusive="both"))]
+    fig4 = fig_single_series(
+        y=sub4["beta"], idx=sub4.index,
+        title=f"β(t) — IT {maturity} Vol vs Inflation Swap {maturity} Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        ylab="Beta", name="beta"
+    )
+
+    # === SCATTERS — filter by R² AND Beta bounds; y-axis fixed to [lo_b, hi_b]
+    res_swap_f = res_swap.dropna(subset=["beta", "r2"])
+    res_swap_f = res_swap_f[(res_swap_f["r2"] >= thr) & (res_swap_f["beta"].between(lo_b, hi_b, inclusive="both"))]
+
+    res_infl_f = res_infl.dropna(subset=["beta", "r2"])
+    res_infl_f = res_infl_f[(res_infl_f["r2"] >= thr) & (res_infl_f["beta"].between(lo_b, hi_b, inclusive="both"))]
+
+    # 5) β (IT vs Swap Vol) vs diff level (IT − Swap)
+    diff_bps_f = (df["it_bps"] - df["sw_bps"]).reindex(res_swap_f.index)
+    fig5 = fig_scatter_heatmap_with_poly(
+        x=diff_bps_f, y=res_swap_f["beta"], index=res_swap_f.index,
+        title=f"β vs Diff level (IT − Swap) — IT {maturity} Vol vs Swap Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        xlab="Diff level (bps)", ylab="Beta", poly_deg=2,
+        beta_bounds=(lo_b, hi_b)
+    )
+
+    # 6) β (IT vs Swap Vol) vs Swap level
+    sw_level_on_beta_idx_f = df["sw_bps"].reindex(res_swap_f.index)
+    fig6 = fig_scatter_heatmap_with_poly(
+        x=sw_level_on_beta_idx_f, y=res_swap_f["beta"], index=res_swap_f.index,
+        title=f"β vs Swap {maturity} level (bps) — IT Vol vs Swap Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        xlab=f"Swap {maturity} (bps)", ylab="Beta", poly_deg=2,
+        beta_bounds=(lo_b, hi_b)
+    )
+
+    # 7) β (IT vs Inflation Vol) vs Country level
+    it_level_on_beta_idx_f = df["it_bps"].reindex(res_infl_f.index)
+    fig7 = fig_scatter_heatmap_with_poly(
+        x=it_level_on_beta_idx_f, y=res_infl_f["beta"], index=res_infl_f.index,
+        title=f"β vs {country_name} {maturity} level (bps) — IT Vol vs Inflation Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        xlab=f"{country_name} {maturity} (bps)", ylab="Beta", poly_deg=2,
+        beta_bounds=(lo_b, hi_b)
+    )
+
+    # 8) β (IT vs Inflation Vol) vs Inflation swap level
+    infl_level_on_beta_idx_f = df["infl_bps"].reindex(res_infl_f.index)
+    fig8 = fig_scatter_heatmap_with_poly(
+        x=infl_level_on_beta_idx_f, y=res_infl_f["beta"], index=res_infl_f.index,
+        title=f"β vs Inflation Swap {maturity} level (bps) — IT Vol vs Inflation Vol — R² ≥ {thr:.2f} & β∈[{lo_b:.2f},{hi_b:.2f}]",
+        xlab=f"Inflation Swap {maturity} (bps)", ylab="Beta", poly_deg=2,
+        beta_bounds=(lo_b, hi_b)
+    )
+
+    return (fig1, fig2, fig3, fig4, fig5, fig6, fig7, fig8)
+
+# ============================
+# 9) MAIN — lancement
+# ============================
+if __name__ == "__main__":
+    import webbrowser, socket
+    def get_local_ip():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]
+        except Exception: ip = "127.0.0.1"
+        finally: s.close()
+        return ip
+
+    host, port = "0.0.0.0", 8051
+    local_ip = get_local_ip()
+    print("\n================= SHARE THIS =================")
+    print(f"Local (toi)    : http://localhost:{port}")
+    print(f"Réseau (équipe): http://{local_ip}:{port}")
+    print("================================================\n")
+    try: webbrowser.open(f"http://localhost:{port}")
+    except Exception: pass
+    app.run_server(host=host, port=port, debug=False)
