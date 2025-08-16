@@ -352,7 +352,7 @@ app.layout = html.Div([
             dcc.RadioItems(
                 id="country",
                 options=build_country_options(),
-                value=(sorted(ALL_COUNTRIES)[0] if ALL_COUNTRIES else None),
+                value=("Italy" if "Italy" in ALL_COUNTRIES else sorted(ALL_COUNTRIES)[0]),
                 inline=True
             ),
         ], style={"display": "inline-block", "marginRight": "32px"}),
